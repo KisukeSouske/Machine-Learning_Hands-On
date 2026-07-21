@@ -85,9 +85,9 @@ def test_start_training_resets_loss_history_between_runs(tmp_path):
     assert len(model.loss_history) == first_run_length
 
 
-def test_start_training_stops_at_max_iterations(tmp_path):
+def test_start_training_stops_at_epochs(tmp_path):
     rows = [(x, 2 * x + 5) for x in range(20)]
     csv_path = _write_csv(tmp_path / "data.csv", rows)
     model = Model(csv_path, "y")
-    model.start_training("x", learning_rate=0.001, max_iterations=3)
+    model.start_training("x", learning_rate=0.001, epochs=3)
     assert len(model.loss_history) == 3
