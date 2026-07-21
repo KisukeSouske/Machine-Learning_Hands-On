@@ -69,7 +69,7 @@ def test_start_training_converges_on_linear_data(tmp_path):
     rows = [(x, 2 * x + 5) for x in range(20)]
     csv_path = _write_csv(tmp_path / "data.csv", rows)
     model = Model(csv_path, "y")
-    model.start_training("x", learning_rate=0.001)
+    model.start_training("x", learning_rate=0.001, show_plot=False)
     assert model.weight == pytest.approx(2.0, abs=0.05)
     assert model.bias == pytest.approx(5.0, abs=0.5)
     assert model.loss_history[-1] < model.loss_history[0]
@@ -79,9 +79,9 @@ def test_start_training_resets_loss_history_between_runs(tmp_path):
     rows = [(x, 2 * x + 5) for x in range(20)]
     csv_path = _write_csv(tmp_path / "data.csv", rows)
     model = Model(csv_path, "y")
-    model.start_training("x", learning_rate=0.001)
+    model.start_training("x", learning_rate=0.001, show_plot=False)
     first_run_length = len(model.loss_history)
-    model.start_training("x", learning_rate=0.001)
+    model.start_training("x", learning_rate=0.001, show_plot=False)
     assert len(model.loss_history) == first_run_length
 
 
@@ -89,5 +89,5 @@ def test_start_training_stops_at_epochs(tmp_path):
     rows = [(x, 2 * x + 5) for x in range(20)]
     csv_path = _write_csv(tmp_path / "data.csv", rows)
     model = Model(csv_path, "y")
-    model.start_training("x", learning_rate=0.001, epochs=3)
+    model.start_training("x", learning_rate=0.001, epochs=3, show_plot=False)
     assert len(model.loss_history) == 3
