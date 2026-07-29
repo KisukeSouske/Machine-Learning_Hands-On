@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import TextBox
 
-from kai.metrics import loss, squared_loss, mean_squared_error
+from kai.metrics import loss, squared_loss, mean_squared_error, r_squared, adjusted_r_squared
 
 PANEL_BACKGROUND = "#E5ECF6"
 FIGURE_BACKGROUND = "#FFFFFF"
@@ -47,13 +47,15 @@ def _draw_fit(ax, x_true: np.ndarray, y_true: np.ndarray, weight: float, bias: f
     return line
 
 
-def _draw_metrics_table(ax, x_true: np.ndarray, y_true: np.ndarray, weight: float, bias: float) -> None:
+def _draw_metrics_table(ax, x_true: np.ndarray, y_true: np.ndarray, weight: float, bias: float, n_features: int = 1) -> None:
     y_pred = bias + weight * x_true
     rows = [
         ("Loss (L1)", loss(y_true, y_pred)),
         ("Squared Loss (L2)", squared_loss(y_true, y_pred)),
         ("MSE", mean_squared_error(y_true, y_pred)),
         ("RMSE", np.sqrt(mean_squared_error(y_true, y_pred))),
+        ("R²", r_squared(y_true, y_pred)),
+        ("R² Adjusted", adjusted_r_squared(y_true, y_pred, n_features)),
     ]
 
     ax.axis("off")
@@ -85,6 +87,7 @@ def build_training_figure(
     bias: float,
     feature_name: str = "feature",
     label_name: str = "label",
+    n_features: int = 1,
 ):
     with plt.rc_context({"font.family": FONT_FAMILY}):
         fig, (ax_loss, ax_fit, ax_table) = plt.subplots(
@@ -99,7 +102,7 @@ def build_training_figure(
         _style_panel(ax_fit)
         line = _draw_fit(ax_fit, x_true, y_true, weight, bias, feature_name, label_name)
 
-        _draw_metrics_table(ax_table, x_true, y_true, weight, bias)
+        _draw_metrics_table(ax_table, x_true, y_true, weight, bias, n_features)
 
         # legend lives outside the plot area (below it) so long column names
         # don't cover the data points
@@ -170,6 +173,7 @@ def plot_training_results(
     bias: float,
     feature_name: str = "feature",
     label_name: str = "label",
+    n_features: int = 1,
 ) -> None:
-    build_training_figure(loss_history, x_true, y_true, weight, bias, feature_name, label_name)
+    build_training_figure(loss_history, x_true, y_true, weight, bias, feature_name, label_name, n_features)
     plt.show()

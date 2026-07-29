@@ -37,13 +37,13 @@ def test_metrics_table_shows_expected_values():
     x_true = np.array([1.0, 2.0, 3.0])
     y_true = np.array([2.0, 4.0, 6.0])
 
-    # weight=2, bias=0 => perfect fit, all metrics should be 0
+    # weight=2, bias=0 => perfect fit: L1/L2/MSE/RMSE are 0, R2/adjusted R2 are 1
     fig = build_training_figure(loss_history, x_true, y_true, weight=2.0, bias=0.0)
     try:
         ax_table = fig.axes[2]
         table = ax_table.tables[0]
-        values = [table.get_celld()[(row, 1)].get_text().get_text() for row in range(1, 5)]
-        assert values == ["0.0000", "0.0000", "0.0000", "0.0000"]
+        values = [table.get_celld()[(row, 1)].get_text().get_text() for row in range(1, 7)]
+        assert values == ["0.0000", "0.0000", "0.0000", "0.0000", "1.0000", "1.0000"]
     finally:
         plt.close(fig)
 
