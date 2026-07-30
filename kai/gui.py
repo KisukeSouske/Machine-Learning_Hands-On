@@ -6,6 +6,8 @@ from tkinter import messagebox, ttk
 
 import pandas as pd
 
+from kai import aero
+from kai.aero import AeroButton, AeroTab, GradientHeader, StatusBar
 from kai.model import Model
 from kai.visualization import (
     CHART_LABELS,
@@ -20,20 +22,18 @@ from kai.visualization import (
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
-APP_BACKGROUND = "#EEF1F6"
-PANEL_HEADER_BG = "#E5ECF6"
+APP_BACKGROUND = aero.WINDOW_BG
+PANEL_HEADER_BG = aero.HEADER_BOTTOM
 LABEL_HIGHLIGHT = "#FFE0B2"
 FEATURE_HIGHLIGHT = "#E1D5F7"
-DEFAULT_CELL_BG = "#FFFFFF"
+DEFAULT_CELL_BG = aero.PANEL_BG
 CHIP_BG = "#E1D5F7"
-TAB_ACTIVE_BG = "#0057E7"
-TAB_ACTIVE_FG = "#FFFFFF"
-TAB_INACTIVE_BG = "#E5ECF6"
-TAB_INACTIVE_FG = "#333333"
+TAB_ACTIVE_BG = aero.TAB_ACTIVE_TOP
+TAB_INACTIVE_BG = aero.TAB_INACTIVE_TOP
 PREVIEW_ROWS = 10
 
 DATA_PANEL_WIDTH = 430
-CONFIG_PANEL_WIDTH = 165
+CONFIG_PANEL_WIDTH = 231  # 165 * 1.4
 PREVIEW_HEIGHT = 150
 BOTTOM_ROW_HEIGHT = 210
 STATUS_PANEL_WIDTH = 240
@@ -195,12 +195,8 @@ class ChartTabBar(tk.Frame):
         self._active = set(active_keys)
         self._tabs = {}
         for key, label in keys_and_labels:
-            tab = tk.Label(
-                self, text=label, padx=14, pady=6, cursor="hand2",
-                font=("Segoe UI", 9, "bold"), borderwidth=0,
-            )
+            tab = AeroTab(self, label, on_click=lambda k=key: self._toggle(k))
             tab.pack(side="left", padx=(0, 2))
-            tab.bind("<Button-1>", lambda _e, k=key: self._toggle(k))
             self._tabs[key] = tab
         self._repaint()
 
@@ -214,10 +210,7 @@ class ChartTabBar(tk.Frame):
 
     def _repaint(self) -> None:
         for key, tab in self._tabs.items():
-            if key in self._active:
-                tab.configure(bg=TAB_ACTIVE_BG, fg=TAB_ACTIVE_FG)
-            else:
-                tab.configure(bg=TAB_INACTIVE_BG, fg=TAB_INACTIVE_FG)
+            tab.set_active(key in self._active)
 
     def get_active(self) -> list[str]:
         return [key for key in self._tabs if key in self._active]
@@ -245,6 +238,10 @@ class TrainingApp(tk.Tk):
 
         # fixed layout: data + hyperparameters keep a constant width on the
         # left, the training area takes whatever is left over
+        self.status_bar = StatusBar(self)
+        self.status_bar.pack(side="bottom", fill="x")
+        self.status_bar.set_text("Ready for selection...")
+
         root = ttk.Frame(self, style="App.TFrame")
         root.pack(fill="both", expand=True, padx=8, pady=8)
 
@@ -291,25 +288,34 @@ class TrainingApp(tk.Tk):
     # ------------------------------------------------------------------ #
     def _configure_styles(self) -> None:
         style = ttk.Style(self)
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
+        # the native Windows theme already draws Aero-style comboboxes,
+        # entries, scrollbars and treeviews; the glossy pieces are hand-drawn
+        for theme in ("vista", "xpnative", "winnative", "clam"):
+            if theme in style.theme_names():
+                style.theme_use(theme)
+                break
         style.configure("TFrame", background=DEFAULT_CELL_BG)
         style.configure("App.TFrame", background=APP_BACKGROUND)
-        style.configure("TLabel", background=DEFAULT_CELL_BG)
-        style.configure("PanelHeader.TLabel", background=PANEL_HEADER_BG, font=("Segoe UI", 10, "bold"), padding=6)
-        style.configure("Field.TLabel", background=DEFAULT_CELL_BG, font=("Segoe UI", 9))
-        style.configure("Small.TLabel", background=DEFAULT_CELL_BG, font=("Segoe UI", 8))
-        style.configure("Stopwatch.TLabel", background=DEFAULT_CELL_BG, font=("Consolas", 26, "bold"))
-        style.configure("Start.TButton", font=("Segoe UI", 10, "bold"), padding=10)
-        style.configure("TCheckbutton", background=DEFAULT_CELL_BG)
-        style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"))
+        style.configure("TLabel", background=DEFAULT_CELL_BG, foreground=aero.HEADER_FG)
+        style.configure("Field.TLabel", background=DEFAULT_CELL_BG, font=("Segoe UI", 9),
+                        foreground=aero.HEADER_FG)
+        style.configure("Small.TLabel", background=DEFAULT_CELL_BG, font=("Segoe UI", 8),
+                        foreground=aero.HEADER_FG)
+        style.configure("Stopwatch.TLabel", background=DEFAULT_CELL_BG, font=("Consolas", 26, "bold"),
+                        foreground=aero.HEADER_FG)
+        style.configure("TCheckbutton", background=DEFAULT_CELL_BG, foreground=aero.HEADER_FG)
+        style.configure("Treeview", background="#FFFFFF", fieldbackground="#FFFFFF",
+                        font=("Segoe UI", 9))
+        style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"), foreground=aero.HEADER_FG)
+        style.map("Treeview", background=[("selected", aero.SELECT_BG)],
+                  foreground=[("selected", "#000000")])
 
-    def _panel(self, parent, title: str) -> ttk.Frame:
-        panel = ttk.Frame(parent, relief="solid", borderwidth=1)
-        ttk.Label(panel, text=title, style="PanelHeader.TLabel", anchor="w").pack(fill="x")
-        panel.body = ttk.Frame(panel)
+    def _panel(self, parent, title: str) -> tk.Frame:
+        panel = tk.Frame(parent, bg=aero.PANEL_BORDER, highlightthickness=0, bd=0)
+        inner = tk.Frame(panel, bg=DEFAULT_CELL_BG)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+        GradientHeader(inner, title).pack(fill="x")
+        panel.body = ttk.Frame(inner)
         panel.body.pack(fill="both", expand=True, padx=8, pady=8)
         return panel
 
@@ -398,6 +404,7 @@ class TrainingApp(tk.Tk):
         self._render_chips()
         self._recolor_preview()
         self.log(f"Loaded {filename} ({len(self._all_columns)} columns)")
+        self.status_bar.set_text(f"{filename} loaded - select the label and feature columns")
 
     def _build_preview(self, df: pd.DataFrame) -> None:
         for child in self.preview_frame.winfo_children():
@@ -540,8 +547,7 @@ class TrainingApp(tk.Tk):
         )
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(parent, textvariable=self.status_var, anchor="center").pack(fill="x")
-        self.start_button = ttk.Button(parent, text="START TRAINING", style="Start.TButton",
-                                        command=self._start_training)
+        self.start_button = AeroButton(parent, "START TRAINING", command=self._start_training, height=32)
         self.start_button.pack(fill="x", pady=8)
 
     # ------------------------------------------------------------------ #
@@ -669,6 +675,7 @@ class TrainingApp(tk.Tk):
             f"epochs={hyperparams['epochs']}, tol={hyperparams['tolerance']}, "
             f"standardize={hyperparams['standardize_features']}"
         )
+        self.status_bar.set_text(f"Training {label_col} ~ {' + '.join(features)} ...")
         self._training_start_time = time.monotonic()
         self._training_thread_alive = True
         self._tick_stopwatch()
@@ -708,6 +715,7 @@ class TrainingApp(tk.Tk):
         if error is not None:
             self.status_var.set("Failed")
             self.log(f"ERROR: {error}")
+            self.status_bar.set_text("Training failed - see the Logs tab")
             messagebox.showerror("Training error", str(error))
             return
 
@@ -722,6 +730,10 @@ class TrainingApp(tk.Tk):
         self._render_charts()
 
         self.status_var.set(f"Done - {len(model.loss_history)} epochs")
+        self.status_bar.set_text(
+            f"Training complete - {len(model.loss_history)} epochs, "
+            f"final MSE {model.loss_history[-1]:.5f}"
+        )
         self.log(f"Finished in {len(model.loss_history)} epochs, final MSE={model.loss_history[-1]:.6f}")
         self.log(f"weights={model.weight}, bias={model.bias:.6f}")
 
