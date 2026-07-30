@@ -145,6 +145,19 @@ def test_mean_squared_error_derivation_known_values():
     assert weight_derivation == pytest.approx(4)
     assert bias_derivation == pytest.approx(2 / 3)
 
+def test_mean_squared_error_derivation_multiple_features():
+    x_true = np.array([[1.0, 2.0], [2.0, 1.0], [3.0, 3.0]])
+    weight = np.array([1.0, 1.0])
+    y_true = np.array([5.0, 5.0, 14.0])
+    y_pred = x_true @ weight
+    # y_pred = [3, 3, 6]; error = y_pred - y_true = [-2, -2, -8]
+    # weight_derivation = x_true.T @ error * 2 / 3 = [-20, -20]
+    # bias_derivation = sum(error * 2) / 3 = -8
+    weight_derivation, bias_derivation = mean_squared_error_derivation(y_true, y_pred, x_true)
+    assert weight_derivation.shape == (2,)
+    assert weight_derivation == pytest.approx([-20.0, -20.0])
+    assert bias_derivation == pytest.approx(-8.0)
+
 def test_mean_squared_error_derivation_y_shape_mismatch_raises():
     y_true = np.array([1.0, 2.0, 3.0])
     y_pred = np.array([1.0, 2.0])

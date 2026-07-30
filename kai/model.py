@@ -1,5 +1,5 @@
-import csv
 import numpy as np
+import pandas as pd
 from kai.metrics import mean_squared_error, mean_squared_error_derivation
 from kai.visualization import plot_training_results
 
@@ -12,7 +12,7 @@ class Model:
         self._loss_history = []
         self._x_train = np.array([])
         self._y_train = np.array([])
-        self._feature = None
+        self._features = []
 
     @property
     def weight(self) -> float:
@@ -34,14 +34,15 @@ class Model:
     def y_train(self) -> np.ndarray:
         return self._y_train.copy()
 
-    def get_data(self, label_column: str, feature_column: str) -> list:
-        with open(self.csv_file, 'r', encoding='utf-8') as file:
-            reader = csv.DictReader(file)
-            return [(row[feature_column], row[label_column]) for row in reader]
+    def get_data(self, label_column: str, features_columns: list[str]) -> tuple[pd.DataFrame, pd.Series]:
+        df = pd.read_csv(self.csv_file)
+        X = df[features_columns]
+        y = df[label_column]
+        return X, y
 
     def start_training(
         self,
-        feature: str,
+        features: list[str],
         learning_rate: float,
         batch_size: int = 100,
         epochs: int = 10_000,
@@ -49,14 +50,12 @@ class Model:
         show_plot: bool = True,
     ) -> None:
         self._loss_history = []
-        weight = 0
+        weight = np.zeros(len(features))
         bias = 0
-        data = self.get_data(self.label_column, feature)
-        x_full = np.array([float(row[0]) for row in data])
-        y_full = np.array([float(row[1]) for row in data])
-        self._x_train, self._y_train, self._feature = x_full, y_full, feature
-        n_samples = len(x_full)
-        last_epoch_loss = float('inf')
+        X, y = self.get_data(self.label_column, features)
+        x_full, y_full = X.to_numpy(), y.to_numpy()
+        self._x_train, self._y_train, self._features = x_full, y_full, features
+        n_samples = len(X)
         rng = np.random.default_rng()
 
         for epoch in range(epochs):
@@ -65,34 +64,36 @@ class Model:
                 batch_idx = indices[start:start + batch_size]
                 x_batch = x_full[batch_idx]
                 y_batch = y_full[batch_idx]
-                y_pred_batch = bias + weight * x_batch
+                y_pred_batch = bias + x_batch @ weight
                 weight_slope, bias_slope = mean_squared_error_derivation(y_batch, y_pred_batch, x_batch)
                 weight -= (learning_rate * weight_slope)
                 bias -= (learning_rate * bias_slope)
 
-            epoch_loss = mean_squared_error(y_full, bias + weight * x_full)
+            y_pred_full = bias + x_full @ weight
+            epoch_loss = mean_squared_error(y_full, y_pred_full)
             if not np.isfinite(epoch_loss):
                 raise ValueError(
                     f"Training diverged at epoch {epoch}: loss became {epoch_loss}. "
                     f"Try a smaller learning_rate (current={learning_rate}) or normalize the feature values."
                 )
             self._loss_history.append(epoch_loss)
-            if abs(epoch_loss - last_epoch_loss) < tolerance:
+
+            # early stopping on the full-dataset gradient norm: a gradient near
+            # zero means there is no direction left that would reduce the loss
+            full_weight_slope, full_bias_slope = mean_squared_error_derivation(y_full, y_pred_full, x_full)
+            gradient_norm = np.sqrt(np.sum(full_weight_slope ** 2) + full_bias_slope ** 2)
+            if gradient_norm < tolerance:
                 break
-            last_epoch_loss = epoch_loss
 
         self._weight, self._bias = weight, bias
 
         if show_plot:
             plot_training_results(
                 self._loss_history,
-                self._x_train,
                 self._y_train,
-                self._weight,
-                self._bias,
-                feature_name=feature,
-                label_name=self.label_column,
+                self.predict(self._x_train),
+                n_features=len(features),
             )
 
     def predict(self, x: np.ndarray) -> np.ndarray:
-        return self._bias + self._weight * np.asarray(x, dtype=float)
+        return self._bias + np.asarray(x, dtype=float) @ self._weight

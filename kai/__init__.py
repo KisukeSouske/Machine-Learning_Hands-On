@@ -7,6 +7,7 @@ from kai.metrics import (
     r_squared,
     adjusted_r_squared,
 )
+from kai.preprocessing import standardize
 
 __all__ = [
     "loss",
@@ -16,4 +17,5 @@ __all__ = [
     "mean_squared_error_derivation",
     "r_squared",
     "adjusted_r_squared",
+    "standardize",
 ]

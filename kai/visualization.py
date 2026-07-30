@@ -1,20 +1,14 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.widgets import TextBox
 
 from kai.metrics import loss, squared_loss, mean_squared_error, r_squared, adjusted_r_squared
 
 PANEL_BACKGROUND = "#E5ECF6"
 FIGURE_BACKGROUND = "#FFFFFF"
 LOSS_CURVE_COLOR = "#0057E7"
-MODEL_LINE_COLOR = "#D62D20"
+ACCENT_COLOR = "#D62D20"
 GRID_COLOR = "#FFFFFF"
 FONT_FAMILY = "Roboto"
-
-
-def _format_equation(weight: float, bias: float, feature_name: str, label_name: str) -> str:
-    sign = "+" if bias >= 0 else "-"
-    return f"{label_name} = {weight:.4f} * {feature_name} {sign} {abs(bias):.4f}"
 
 
 def _style_panel(ax) -> None:
@@ -25,30 +19,46 @@ def _style_panel(ax) -> None:
         spine.set_visible(False)
 
 
-def _draw_loss_curve(ax, loss_history: list) -> None:
+def draw_loss_curve(ax, loss_history: list) -> None:
     loss_values = np.asarray(loss_history, dtype=float)
     finite_mask = np.isfinite(loss_values)
     epochs = np.arange(1, len(loss_values) + 1)
+    _style_panel(ax)
     ax.plot(epochs[finite_mask], loss_values[finite_mask], color=LOSS_CURVE_COLOR, linewidth=2.5)
     ax.set_title("Loss curve")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("MSE")
 
 
-def _draw_fit(ax, x_true: np.ndarray, y_true: np.ndarray, weight: float, bias: float, feature_name: str, label_name: str):
-    ax.scatter(x_true, y_true, color="tab:blue", label="Data", zorder=3)
-    x_line = np.linspace(x_true.min(), x_true.max(), 200)
-    y_line = bias + weight * x_line
-    equation = _format_equation(weight, bias, feature_name, label_name)
-    line, = ax.plot(x_line, y_line, color=MODEL_LINE_COLOR, linewidth=2, picker=5, label=equation, zorder=4)
-    ax.set_title(f"{label_name} vs {feature_name}")
-    ax.set_xlabel(feature_name)
-    ax.set_ylabel(label_name)
-    return line
+def draw_residuals_plot(ax, y_true: np.ndarray, y_pred: np.ndarray) -> None:
+    # residuals vs predicted: the classic diagnostic for non-linearity and
+    # heteroscedasticity (residuals should scatter randomly around 0, with no
+    # funnel shape and no curved pattern)
+    residuals = y_true - y_pred
+    _style_panel(ax)
+    ax.scatter(y_pred, residuals, color="tab:blue", alpha=0.8, zorder=3)
+    ax.axhline(0, color=ACCENT_COLOR, linewidth=2, zorder=4)
+    ax.set_title("Residuals vs Predicted")
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("Residual (actual - predicted)")
 
 
-def _draw_metrics_table(ax, x_true: np.ndarray, y_true: np.ndarray, weight: float, bias: float, n_features: int = 1) -> None:
-    y_pred = bias + weight * x_true
+def draw_predicted_vs_actual_plot(ax, y_true: np.ndarray, y_pred: np.ndarray) -> None:
+    # predicted vs actual: how close the model is to a perfect y = x diagonal.
+    # unlike a "feature vs label" scatter, this works for any number of
+    # features, since it never needs to plot an individual predictor
+    _style_panel(ax)
+    ax.scatter(y_true, y_pred, color="tab:blue", alpha=0.8, zorder=3)
+    lo = min(y_true.min(), y_pred.min())
+    hi = max(y_true.max(), y_pred.max())
+    ax.plot([lo, hi], [lo, hi], color=ACCENT_COLOR, linewidth=2, zorder=4, label="y = x")
+    ax.set_title("Predicted vs Actual")
+    ax.set_xlabel("Actual")
+    ax.set_ylabel("Predicted")
+    ax.legend()
+
+
+def draw_metrics_table(ax, y_true: np.ndarray, y_pred: np.ndarray, n_features: int = 1) -> None:
     rows = [
         ("Loss (L1)", loss(y_true, y_pred)),
         ("Squared Loss (L2)", squared_loss(y_true, y_pred)),
@@ -67,7 +77,7 @@ def _draw_metrics_table(ax, x_true: np.ndarray, y_true: np.ndarray, weight: floa
     )
     table.auto_set_font_size(False)
     table.set_fontsize(11)
-    table.scale(1, 2.2)
+    table.scale(1, 1.6)
     for (row, _col), cell in table.get_celld().items():
         cell.set_edgecolor(GRID_COLOR)
         cell.set_linewidth(2)
@@ -79,101 +89,24 @@ def _draw_metrics_table(ax, x_true: np.ndarray, y_true: np.ndarray, weight: floa
             cell.set_text_props(fontfamily=FONT_FAMILY)
 
 
-def build_training_figure(
-    loss_history: list,
-    x_true: np.ndarray,
-    y_true: np.ndarray,
-    weight: float,
-    bias: float,
-    feature_name: str = "feature",
-    label_name: str = "label",
-    n_features: int = 1,
-):
+def build_dashboard_figure(fig, loss_history: list, y_true: np.ndarray, y_pred: np.ndarray, n_features: int = 1):
+    """Populate `fig` with the 2x2 training dashboard. `fig` can be a pyplot
+    figure (standalone popup) or a bare matplotlib.figure.Figure (embedded in
+    a GUI canvas) - this function doesn't care which, it never calls show()."""
     with plt.rc_context({"font.family": FONT_FAMILY}):
-        fig, (ax_loss, ax_fit, ax_table) = plt.subplots(
-            1, 3, figsize=(16, 5), gridspec_kw={"width_ratios": [1, 1, 0.7]}
-        )
         fig.patch.set_facecolor(FIGURE_BACKGROUND)
-        plt.subplots_adjust(bottom=0.3)
+        (ax_loss, ax_residuals), (ax_pred_actual, ax_table) = fig.subplots(2, 2)
 
-        _style_panel(ax_loss)
-        _draw_loss_curve(ax_loss, loss_history)
+        draw_loss_curve(ax_loss, loss_history)
+        draw_residuals_plot(ax_residuals, y_true, y_pred)
+        draw_predicted_vs_actual_plot(ax_pred_actual, y_true, y_pred)
+        draw_metrics_table(ax_table, y_true, y_pred, n_features)
 
-        _style_panel(ax_fit)
-        line = _draw_fit(ax_fit, x_true, y_true, weight, bias, feature_name, label_name)
-
-        _draw_metrics_table(ax_table, x_true, y_true, weight, bias, n_features)
-
-        # legend lives outside the plot area (below it) so long column names
-        # don't cover the data points
-        handles, labels = ax_fit.get_legend_handles_labels()
-        fit_bbox = ax_fit.get_position()
-        legend_center_x = (fit_bbox.x0 + fit_bbox.x1) / 2
-        fig.legend(
-            handles,
-            labels,
-            loc="upper center",
-            bbox_to_anchor=(legend_center_x, 0.23),
-            frameon=True,
-            facecolor=PANEL_BACKGROUND,
-            edgecolor=GRID_COLOR,
-            fontsize=10,
-        )
-
-        marker, = ax_fit.plot([], [], "o", color="orange", markersize=10, zorder=5)
-        annotation = ax_fit.annotate(
-            "",
-            xy=(0, 0),
-            xytext=(15, 15),
-            textcoords="offset points",
-            bbox=dict(boxstyle="round", fc="w"),
-            arrowprops=dict(arrowstyle="->"),
-        )
-        annotation.set_visible(False)
-
-        def show_prediction(x_value: float) -> None:
-            y_value = bias + weight * x_value
-            marker.set_data([x_value], [y_value])
-            annotation.xy = (x_value, y_value)
-            annotation.set_text(f"{feature_name} = {x_value:.3g}\n{label_name} = {y_value:.3g}")
-            annotation.set_visible(True)
-            fig.canvas.draw_idle()
-
-        def on_pick(event) -> None:
-            if event.artist is not line or event.mouseevent.xdata is None:
-                return
-            show_prediction(event.mouseevent.xdata)
-
-        fig.canvas.mpl_connect("pick_event", on_pick)
-
-        textbox_ax = fig.add_axes([0.3, 0.05, 0.25, 0.05])
-        textbox = TextBox(textbox_ax, f"{feature_name} = ")
-
-        def on_submit(text: str) -> None:
-            try:
-                x_value = float(text)
-            except ValueError:
-                return
-            show_prediction(x_value)
-
-        textbox.on_submit(on_submit)
-
-        # keep a strong reference alive, otherwise the widget can be garbage
-        # collected and silently stop responding to input
-        fig.kai_textbox = textbox
-
+        fig.tight_layout()
         return fig
 
 
-def plot_training_results(
-    loss_history: list,
-    x_true: np.ndarray,
-    y_true: np.ndarray,
-    weight: float,
-    bias: float,
-    feature_name: str = "feature",
-    label_name: str = "label",
-    n_features: int = 1,
-) -> None:
-    build_training_figure(loss_history, x_true, y_true, weight, bias, feature_name, label_name, n_features)
+def plot_training_results(loss_history: list, y_true: np.ndarray, y_pred: np.ndarray, n_features: int = 1) -> None:
+    fig = plt.figure(figsize=(11, 8))
+    build_dashboard_figure(fig, loss_history, y_true, y_pred, n_features)
     plt.show()
