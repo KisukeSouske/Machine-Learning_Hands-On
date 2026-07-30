@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from kai.metrics import mean_squared_error, mean_squared_error_derivation
+from kai.preprocessing import standardize
 from kai.visualization import plot_training_results
 
 class Model:
@@ -13,6 +14,8 @@ class Model:
         self._x_train = np.array([])
         self._y_train = np.array([])
         self._features = []
+        self._feature_mean = None
+        self._feature_std = None
 
     @property
     def weight(self) -> float:
@@ -48,14 +51,25 @@ class Model:
         epochs: int = 10_000,
         tolerance: float = 1e-6,
         show_plot: bool = True,
+        standardize_features: bool = False,
     ) -> None:
         self._loss_history = []
         weight = np.zeros(len(features))
         bias = 0
         X, y = self.get_data(self.label_column, features)
-        x_full, y_full = X.to_numpy(), y.to_numpy()
-        self._x_train, self._y_train, self._features = x_full, y_full, features
+        x_raw, y_full = X.to_numpy(dtype=float), y.to_numpy(dtype=float)
+        # _x_train always keeps the RAW values; predict() re-applies the same
+        # transform, so callers never have to know whether training was scaled
+        self._x_train, self._y_train, self._features = x_raw, y_full, features
+
+        if standardize_features:
+            x_full, self._feature_mean, self._feature_std = standardize(x_raw)
+        else:
+            x_full = x_raw
+            self._feature_mean = self._feature_std = None
+
         n_samples = len(X)
+        last_epoch_loss = float('inf')
         rng = np.random.default_rng()
 
         for epoch in range(epochs):
@@ -78,12 +92,12 @@ class Model:
                 )
             self._loss_history.append(epoch_loss)
 
-            # early stopping on the full-dataset gradient norm: a gradient near
-            # zero means there is no direction left that would reduce the loss
-            full_weight_slope, full_bias_slope = mean_squared_error_derivation(y_full, y_pred_full, x_full)
-            gradient_norm = np.sqrt(np.sum(full_weight_slope ** 2) + full_bias_slope ** 2)
-            if gradient_norm < tolerance:
+            # early stopping on how much the loss still moves between epochs:
+            # in practice this triggers, while a gradient-norm threshold stays
+            # above 1e-6 for far longer and never stops before max epochs
+            if abs(epoch_loss - last_epoch_loss) < tolerance:
                 break
+            last_epoch_loss = epoch_loss
 
         self._weight, self._bias = weight, bias
 
@@ -96,4 +110,7 @@ class Model:
             )
 
     def predict(self, x: np.ndarray) -> np.ndarray:
-        return self._bias + np.asarray(x, dtype=float) @ self._weight
+        x = np.asarray(x, dtype=float)
+        if self._feature_mean is not None:
+            x = (x - self._feature_mean) / self._feature_std
+        return self._bias + x @ self._weight

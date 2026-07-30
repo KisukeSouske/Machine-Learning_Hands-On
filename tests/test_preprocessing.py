@@ -40,6 +40,14 @@ def test_standardize_single_feature_1d():
     assert X_scaled.std() == pytest.approx(1.0)
 
 
+def test_standardize_constant_column_does_not_divide_by_zero():
+    X = np.array([[1.0, 5.0], [2.0, 5.0], [3.0, 5.0]])
+    X_scaled, _, std = standardize(X)
+    assert np.isfinite(X_scaled).all()
+    assert list(X_scaled[:, 1]) == pytest.approx([0.0, 0.0, 0.0])
+    assert std[1] == 1.0
+
+
 def test_standardize_new_data_reuses_train_mean_and_std():
     X_train = np.array([[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [4.0, 40.0]])
     _, mean, std = standardize(X_train)

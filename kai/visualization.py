@@ -58,8 +58,10 @@ def draw_predicted_vs_actual_plot(ax, y_true: np.ndarray, y_pred: np.ndarray) ->
     ax.legend()
 
 
-def draw_metrics_table(ax, y_true: np.ndarray, y_pred: np.ndarray, n_features: int = 1) -> None:
-    rows = [
+def metrics_rows(y_true: np.ndarray, y_pred: np.ndarray, n_features: int = 1) -> list[tuple[str, float]]:
+    """Single source of truth for the reported metrics, shared by the matplotlib
+    table and by any GUI widget that renders the same numbers."""
+    return [
         ("Loss (L1)", loss(y_true, y_pred)),
         ("Squared Loss (L2)", squared_loss(y_true, y_pred)),
         ("MSE", mean_squared_error(y_true, y_pred)),
@@ -67,6 +69,10 @@ def draw_metrics_table(ax, y_true: np.ndarray, y_pred: np.ndarray, n_features: i
         ("R²", r_squared(y_true, y_pred)),
         ("R² Adjusted", adjusted_r_squared(y_true, y_pred, n_features)),
     ]
+
+
+def draw_metrics_table(ax, y_true: np.ndarray, y_pred: np.ndarray, n_features: int = 1) -> None:
+    rows = metrics_rows(y_true, y_pred, n_features)
 
     ax.axis("off")
     table = ax.table(
@@ -87,6 +93,46 @@ def draw_metrics_table(ax, y_true: np.ndarray, y_pred: np.ndarray, n_features: i
         else:
             cell.set_facecolor(FIGURE_BACKGROUND)
             cell.set_text_props(fontfamily=FONT_FAMILY)
+
+
+CHART_LOSS = "loss"
+CHART_RESIDUALS = "residuals"
+CHART_PREDICTED_VS_ACTUAL = "predicted_vs_actual"
+
+CHART_LABELS = {
+    CHART_LOSS: "Loss Curve",
+    CHART_RESIDUALS: "Residuals Plot",
+    CHART_PREDICTED_VS_ACTUAL: "Predicted vs Actual",
+}
+
+
+def build_charts_figure(fig, loss_history: list, y_true: np.ndarray, y_pred: np.ndarray, charts=None):
+    """Populate `fig` with the requested charts, side by side. `charts` is a
+    sequence of the CHART_* keys; drawing fewer of them keeps each one wide
+    enough to read. Used by the GUI, where metrics live in a native table."""
+    if charts is None:
+        charts = [CHART_LOSS]
+    charts = [c for c in charts if c in CHART_LABELS]
+
+    with plt.rc_context({"font.family": FONT_FAMILY}):
+        fig.patch.set_facecolor(FIGURE_BACKGROUND)
+        if not charts:
+            ax = fig.subplots(1, 1)
+            ax.axis("off")
+            ax.text(0.5, 0.5, "Select at least one chart", ha="center", va="center", color="#888888")
+            return fig
+
+        axes = fig.subplots(1, len(charts), squeeze=False)[0]
+        for ax, chart in zip(axes, charts):
+            if chart == CHART_LOSS:
+                draw_loss_curve(ax, loss_history)
+            elif chart == CHART_RESIDUALS:
+                draw_residuals_plot(ax, y_true, y_pred)
+            else:
+                draw_predicted_vs_actual_plot(ax, y_true, y_pred)
+
+        fig.tight_layout()
+        return fig
 
 
 def build_dashboard_figure(fig, loss_history: list, y_true: np.ndarray, y_pred: np.ndarray, n_features: int = 1):

@@ -1,6 +1,6 @@
 import csv
 
-from kai.gui import list_csv_files, read_csv_preview
+from kai.gui import format_elapsed, list_csv_files, read_csv_preview
 
 
 def _write_csv(path, rows, header=("x", "y")):
@@ -45,3 +45,25 @@ def test_read_csv_preview_handles_fewer_rows_than_requested(tmp_path):
     preview = read_csv_preview(path, n_rows=10)
 
     assert len(preview) == 2
+
+
+# Test cases for format_elapsed
+def test_format_elapsed_zero():
+    assert format_elapsed(0) == "00:00:00"
+
+
+def test_format_elapsed_sub_minute():
+    assert format_elapsed(2.45) == "00:02:45"
+
+
+def test_format_elapsed_over_a_minute():
+    assert format_elapsed(65.5) == "01:05:50"
+
+
+def test_format_elapsed_rounds_centiseconds_without_overflowing():
+    # 3.999s must not render as "00:03:100"
+    assert format_elapsed(3.999) == "00:04:00"
+
+
+def test_format_elapsed_negative_clamps_to_zero():
+    assert format_elapsed(-1.0) == "00:00:00"

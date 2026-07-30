@@ -121,6 +121,47 @@ def test_start_training_converges_on_multiple_features(tmp_path):
     assert model.bias == pytest.approx(5.0, abs=0.5)
 
 
+def test_start_training_with_standardization_converges(tmp_path):
+    # features on wildly different scales: raw gradient descent struggles here,
+    # standardization is what makes a sane learning rate work
+    rng = np.random.default_rng(0)
+    x1 = rng.uniform(0, 1000, 80)
+    x2 = rng.uniform(0, 1, 80)
+    y = 0.5 * x1 + 20 * x2 + 3
+    rows = list(zip(x1, x2, y))
+    csv_path = _write_csv(tmp_path / "data.csv", rows, header=("x1", "x2", "y"))
+    model = Model(csv_path, "y")
+    model.start_training(["x1", "x2"], learning_rate=0.1, epochs=5000, show_plot=False,
+                         standardize_features=True)
+    # predictions must be accurate in the ORIGINAL feature space
+    predictions = model.predict(model.x_train)
+    assert predictions == pytest.approx(model.y_train, abs=0.5)
+
+
+def test_predict_applies_training_standardization_to_new_data(tmp_path):
+    rows = [(x, 2 * x + 5) for x in range(20)]
+    csv_path = _write_csv(tmp_path / "data.csv", rows)
+    model = Model(csv_path, "y")
+    model.start_training(["x"], learning_rate=0.1, epochs=5000, show_plot=False,
+                         standardize_features=True)
+    # a raw (unstandardized) input must still map to the right prediction
+    assert model.predict(np.array([[10.0]])) == pytest.approx([25.0], abs=0.2)
+
+
+def test_start_training_without_standardization_clears_previous_scaling(tmp_path):
+    rows = [(x, 2 * x + 5) for x in range(20)]
+    csv_path = _write_csv(tmp_path / "data.csv", rows)
+    model = Model(csv_path, "y")
+    model.start_training(["x"], learning_rate=0.1, epochs=2000, show_plot=False,
+                         standardize_features=True)
+    assert model._feature_mean is not None
+
+    model.start_training(["x"], learning_rate=0.001, epochs=2000, show_plot=False,
+                         standardize_features=False)
+    assert model._feature_mean is None
+    assert model.predict(np.array([[10.0]])) == pytest.approx([25.0], abs=0.5)
+
+
 def test_start_training_resets_loss_history_between_runs(tmp_path):
     rows = [(x, 2 * x + 5) for x in range(20)]
     csv_path = _write_csv(tmp_path / "data.csv", rows)
