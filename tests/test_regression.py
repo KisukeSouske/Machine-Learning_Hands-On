@@ -13,6 +13,7 @@ from kai.regression import (
     fit_ols,
     gradient_norm,
     solve_linear_system,
+    variance_inflation_factors,
 )
 
 
@@ -183,6 +184,16 @@ def test_fitted_model_predicts_the_training_targets():
     y = X @ np.array([1.0, -2.0]) + 3.0
     fit = fit_ols(X, y)
     assert fit.predict(X) == pytest.approx(y)
+
+
+def test_variance_inflation_factors_raise_for_perfect_collinearity():
+    features = {
+        "x1": np.array([1.0, 2.0, 3.0, 4.0]),
+        "x2": np.array([2.0, 4.0, 6.0, 8.0]),
+    }
+
+    with pytest.raises(ValueError, match="perfectly collinear"):
+        variance_inflation_factors(features)
 
 
 # --- gradient_norm ---

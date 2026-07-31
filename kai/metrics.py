@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 
 def _as_arrays(y_true, y_pred) -> tuple[np.ndarray, np.ndarray]:
     # Accepts any array-like (list, tuple, Series, ndarray) and validates shapes,

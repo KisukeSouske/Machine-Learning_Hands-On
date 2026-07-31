@@ -17,8 +17,9 @@ from a VIF routine that regresses one feature against the others.
 from dataclasses import dataclass
 
 import numpy as np
+from scipy import stats as scipy_stats
 
-from kai.metrics import mean_squared_error, mean_squared_error_derivation
+from kai.metrics import mean_squared_error, mean_squared_error_derivation, r_squared, squared_loss
 
 
 @dataclass(frozen=True)
@@ -37,7 +38,12 @@ class LinearFit:
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Predictions for X, in the same feature space the fit was made in."""
-        return self.bias + np.asarray(X, dtype=float) @ self.weights
+        X = np.asarray(X, dtype=float)
+        # mirror _as_design_inputs's promotion, so a 1-D X round-trips through
+        # fit_ols(x, y).predict(x) the same way it went in
+        if X.ndim == 1 and self.weights.shape[0] == 1:
+            X = X.reshape(-1, 1)
+        return self.bias + X @ self.weights
 
 
 def _as_design_inputs(X, y) -> tuple[np.ndarray, np.ndarray]:
@@ -241,3 +247,220 @@ def gradient_norm(y_true: np.ndarray, y_pred: np.ndarray, X: np.ndarray) -> floa
     """Euclidean norm of the full MSE gradient (weights and bias together)."""
     weight_slope, bias_slope = mean_squared_error_derivation(y_true, y_pred, X)
     return float(np.sqrt(np.sum(weight_slope ** 2) + bias_slope ** 2))
+
+def variance_inflation_factors(features: dict) -> dict:
+    """Compute variance inflation factors for each feature.
+
+    For each predictor Xj, the VIF measures how much Xj can be explained by the
+    other predictors. The implementation fits one regression of Xj against the
+    remaining columns and computes
+
+        VIF(Xj) = 1 / (1 - R^2_{Xj | X_{-j}})
+
+    using the existing OLS solver and R^2 helper.
+    """
+    if not features:
+        raise ValueError("features must not be empty.")
+
+    columns = list(features.keys())
+    feature_arrays = {}
+    n_samples = None
+
+    for column in columns:
+        values = np.asarray(features[column], dtype=float)
+        if values.ndim != 1:
+            raise ValueError(f"Feature '{column}' must be 1-D, got shape {values.shape}.")
+        if n_samples is None:
+            n_samples = values.shape[0]
+        elif values.shape[0] != n_samples:
+            raise ValueError(
+                f"All features must contain the same number of samples; "
+                f"'{column}' has {values.shape[0]} while the first feature has {n_samples}."
+            )
+        feature_arrays[column] = values
+
+    vif: dict[str, float] = {}
+    for target_name in columns:
+        target_values = feature_arrays[target_name]
+        other_names = [name for name in columns if name != target_name]
+        if not other_names:
+            vif[target_name] = 1.0
+            continue
+
+        other_values = [feature_arrays[name] for name in other_names]
+        design_matrix = np.column_stack(other_values)
+
+        try:
+            fit_result = fit_ols(design_matrix, target_values)
+        except ValueError as exc:
+            raise ValueError(
+                f"VIF for '{target_name}' is undefined because the predictors "
+                "are perfectly collinear."
+            ) from exc
+
+        fitted_values = fit_result.predict(design_matrix)
+        r_squared_value = r_squared(target_values, fitted_values)
+        if r_squared_value >= 1.0:
+            raise ValueError(
+                f"VIF for '{target_name}' is undefined because the predictors "
+                "are perfectly collinear."
+            )
+        vif[target_name] = 1.0 / (1.0 - r_squared_value)
+
+    return vif
+
+
+def _inverse_diagonal(A: np.ndarray) -> np.ndarray:
+    """Diagonal of A^-1, via `solve_linear_system` one column at a time.
+
+    Solving A @ x = e_i for each standard basis vector e_i gives the i-th
+    column of A^-1; its i-th entry is what coefficient_standard_errors needs.
+    Written this way (rather than np.linalg.inv) to reuse the same
+    hand-written elimination as `fit_ols`, instead of a second solver.
+    """
+    n = A.shape[0]
+    identity = np.eye(n)
+    diagonal = np.empty(n)
+    for i in range(n):
+        column = solve_linear_system(A, identity[i])
+        diagonal[i] = column[i]
+    return diagonal
+
+
+def residual_standard_error(y_true, y_pred, n_features: int) -> float:
+    """RSE = sqrt(RSS / (n - p - 1)): the estimate of the error term's standard
+    deviation (ISLR eq. 3.15, generalized to p predictors; UFMG-EST-027 Cap.11
+    calls the squared version sigma^2_hat).
+
+    Raises:
+    ValueError: If n_samples <= n_features + 1, where the degrees of freedom
+        (n - p - 1) is zero or negative and RSE is undefined.
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    degrees_of_freedom = y_true.size - n_features - 1
+    if degrees_of_freedom <= 0:
+        raise ValueError(
+            f"Residual standard error requires n_samples > n_features + 1 "
+            f"(got n_samples={y_true.size}, n_features={n_features})."
+        )
+    return float(np.sqrt(squared_loss(y_true, y_pred) / degrees_of_freedom))
+
+
+def coefficient_standard_errors(X, y_true, y_pred) -> np.ndarray:
+    """Standard error of every fitted coefficient, intercept first.
+
+    SE(beta_hat) = sqrt(sigma_hat^2 * diag((Xd^T Xd)^-1)), where Xd is the
+    design matrix and sigma_hat^2 = RSS/(n-p-1) (ISLR eq. 3.8, generalized
+    from simple to multiple regression via the (X^T X)^-1 matrix form
+    mentioned on ISLR p.p.75-77 and derived in matrix form in most
+    econometrics texts). Reduces exactly to eq. 3.8 when X has one column.
+
+    Returns:
+    np.ndarray: shape (n_features + 1,), i.e. [SE(intercept), SE(coef_1), ...].
+
+    Raises:
+    ValueError: If n_samples <= n_features + 1 (degenerate degrees of freedom).
+    """
+    X, y_true = _as_design_inputs(X, y_true)
+    y_pred = np.asarray(y_pred, dtype=float)
+    design = add_intercept(X)
+    n_samples, n_coefficients = design.shape
+    degrees_of_freedom = n_samples - n_coefficients
+    if degrees_of_freedom <= 0:
+        raise ValueError(
+            f"Standard errors require n_samples > n_features + 1 "
+            f"(got n_samples={n_samples}, n_features={n_coefficients - 1})."
+        )
+    sigma_squared = squared_loss(y_true, y_pred) / degrees_of_freedom
+    normal_matrix = design.T @ design
+    return np.sqrt(sigma_squared * _inverse_diagonal(normal_matrix))
+
+
+def t_statistics(coefficients: np.ndarray, standard_errors: np.ndarray) -> np.ndarray:
+    """t = coefficient / SE(coefficient) (ISLR eq. 3.14; UFMG-EST-027 Cap.11 eq.
+    for T0), one per coefficient. Tests H0: coefficient = 0 for each."""
+    coefficients = np.asarray(coefficients, dtype=float)
+    standard_errors = np.asarray(standard_errors, dtype=float)
+    if coefficients.shape != standard_errors.shape:
+        raise ValueError(
+            f"coefficients and standard_errors must have the same shape "
+            f"(got {coefficients.shape} and {standard_errors.shape})."
+        )
+    return coefficients / standard_errors
+
+
+def p_values(t_stats: np.ndarray, degrees_of_freedom: int) -> np.ndarray:
+    """Two-tailed p-value for each t-statistic, under a t-distribution with
+    the given degrees of freedom: p = 2 * P(T > |t|).
+
+    Uses the survival function (`sf`) rather than `1 - cdf`: for a large |t|
+    (a strongly significant coefficient), cdf(|t|) rounds to exactly 1.0 in
+    float64, and `1 - 1.0` underflows to a false p=0.0. `sf` computes the
+    tail probability directly, without that cancellation.
+
+    Raises:
+    ValueError: If degrees_of_freedom <= 0.
+    """
+    if degrees_of_freedom <= 0:
+        raise ValueError(f"degrees_of_freedom must be positive (got {degrees_of_freedom}).")
+    t_stats = np.asarray(t_stats, dtype=float)
+    return 2.0 * scipy_stats.t.sf(np.abs(t_stats), df=degrees_of_freedom)
+
+
+@dataclass(frozen=True)
+class InferenceSummary:
+    """Per-coefficient inference for a fitted linear model, intercept first.
+
+    Everything a results table needs in one place: names line up positionally
+    with coefficients/standard_errors/t_statistics/p_values.
+    """
+
+    names: tuple[str, ...]
+    coefficients: np.ndarray
+    standard_errors: np.ndarray
+    t_statistics: np.ndarray
+    p_values: np.ndarray
+    residual_standard_error: float
+    degrees_of_freedom: int
+
+
+def summarize_inference(X, y_true, fit: LinearFit, feature_names: list[str] | None = None) -> InferenceSummary:
+    """Build the full per-coefficient inference table for a fit produced by
+    `fit_ols` (statistically valid only for the exact least-squares solution;
+    see the note on `fit_ols`).
+
+    Parameters:
+    X (array-like): The same features the fit was made on.
+    y_true (array-like): The same target the fit was made on.
+    fit (LinearFit): Typically the result of `fit_ols(X, y_true)`.
+    feature_names (list[str] | None): Labels for the columns of X, in order.
+        Defaults to "x1", "x2", ... if not given.
+    """
+    X, y_true = _as_design_inputs(X, y_true)
+    y_pred = fit.predict(X)
+    n_features = X.shape[1]
+
+    if feature_names is None:
+        feature_names = [f"x{i + 1}" for i in range(n_features)]
+    elif len(feature_names) != n_features:
+        raise ValueError(
+            f"feature_names has {len(feature_names)} entries but X has {n_features} columns."
+        )
+
+    coefficients = np.concatenate([[fit.bias], fit.weights])
+    standard_errors = coefficient_standard_errors(X, y_true, y_pred)
+    t_stats = t_statistics(coefficients, standard_errors)
+    degrees_of_freedom = X.shape[0] - n_features - 1
+    p_vals = p_values(t_stats, degrees_of_freedom)
+    rse = residual_standard_error(y_true, y_pred, n_features)
+
+    return InferenceSummary(
+        names=("Intercept", *feature_names),
+        coefficients=coefficients,
+        standard_errors=standard_errors,
+        t_statistics=t_stats,
+        p_values=p_vals,
+        residual_standard_error=rse,
+        degrees_of_freedom=degrees_of_freedom,
+    )
