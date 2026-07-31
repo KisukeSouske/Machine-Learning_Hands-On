@@ -1,19 +1,27 @@
 import numpy as np
 
+def _as_arrays(y_true, y_pred) -> tuple[np.ndarray, np.ndarray]:
+    # Accepts any array-like (list, tuple, Series, ndarray) and validates shapes,
+    # so every public metric shares the same input contract.
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    if y_true.shape != y_pred.shape:
+        raise ValueError("Shapes of y_true and y_pred must be the same.")
+    return y_true, y_pred
+
 def loss(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     # Total absolute error: sums the magnitudes of the residuals, showing the overall distance between predictions and observations.
     """
     Calculate loss between true and predicted values.
 
     Parameters:
-    y_true (np.ndarray): True values.
-    y_pred (np.ndarray): Predicted values.
+    y_true (array-like): True values.
+    y_pred (array-like): Predicted values.
 
     Returns:
     float: The sum of absolute differences between true and predicted values.
     """
-    if y_true.shape != y_pred.shape:
-        raise ValueError("Shapes of y_true and y_pred must be the same.")
+    y_true, y_pred = _as_arrays(y_true, y_pred)
     return np.sum(abs(y_true - y_pred))
 
 def mean_absolute_error(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -28,8 +36,7 @@ def mean_absolute_error(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     Returns:
     float: The mean of absolute differences between true and predicted values.
     """
-    if y_true.shape != y_pred.shape:
-        raise ValueError("Shapes of y_true and y_pred must be the same.")
+    y_true, y_pred = _as_arrays(y_true, y_pred)
     return loss(y_true, y_pred) / y_true.size
 
 def squared_loss(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -44,8 +51,7 @@ def squared_loss(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     Returns:
     float: The sum of squared differences between true and predicted values.
     """
-    if y_true.shape != y_pred.shape:
-        raise ValueError("Shapes of y_true and y_pred must be the same.")
+    y_true, y_pred = _as_arrays(y_true, y_pred)
     return np.sum((y_true - y_pred) ** 2)
 
 def mean_squared_error(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -60,8 +66,7 @@ def mean_squared_error(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     Returns:
     float: The mean of squared differences between true and predicted values.
     """
-    if y_true.shape != y_pred.shape:
-        raise ValueError("Shapes of y_true and y_pred must be the same.")
+    y_true, y_pred = _as_arrays(y_true, y_pred)
     return squared_loss(y_true, y_pred) / y_true.size
 
 # Mean Squared Error derivative: the gradient of the MSE with respect to the model parameters, used to update weights and bias during gradient descent.
@@ -79,8 +84,8 @@ def mean_squared_error_derivation(y_true: np.ndarray, y_pred: np.ndarray, x_true
     tuple[np.ndarray, float]: The (weight_derivation, bias_derivation) gradients.
         weight_derivation has shape (n_features,).
     """
-    if y_true.shape != y_pred.shape:
-        raise ValueError("Shapes of y_true and y_pred must be the same.")
+    y_true, y_pred = _as_arrays(y_true, y_pred)
+    x_true = np.asarray(x_true, dtype=float)
     if x_true.shape[0] != y_true.shape[0]:
         raise ValueError("x_true must have the same number of samples as y_true.")
 
@@ -100,6 +105,7 @@ def total_sum_of_squares(y_true: np.ndarray) -> float:
     Returns:
     float: The total sum of squares.
     """
+    y_true = np.asarray(y_true, dtype=float)
     return np.sum((y_true - np.mean(y_true)) ** 2)
 
 def r_squared(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -113,11 +119,16 @@ def r_squared(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 
     Returns:
     float: The R-squared value.
+
+    Raises:
+    ValueError: If y_true is constant (TSS = 0), since R² is undefined
+        when the target has no variance to explain.
     """
-    if y_true.shape != y_pred.shape:
-        raise ValueError("Shapes of y_true and y_pred must be the same.")
+    y_true, y_pred = _as_arrays(y_true, y_pred)
     rss = squared_loss(y_true, y_pred)
     tss = total_sum_of_squares(y_true)
+    if tss == 0:
+        raise ValueError("R² is undefined when y_true is constant (TSS = 0).")
     return 1 - (rss / tss)
 
 def adjusted_r_squared(y_true: np.ndarray, y_pred: np.ndarray, n_features: int) -> float:
@@ -132,10 +143,19 @@ def adjusted_r_squared(y_true: np.ndarray, y_pred: np.ndarray, n_features: int) 
 
     Returns:
     float: The Adjusted R-squared value.
+
+    Raises:
+    ValueError: If n_samples <= n_features + 1, where the adjustment
+        denominator (n - p - 1) is zero or negative and the statistic
+        is undefined.
     """
-    if y_true.shape != y_pred.shape:
-        raise ValueError("Shapes of y_true and y_pred must be the same.")
+    y_true, y_pred = _as_arrays(y_true, y_pred)
     n_samples = y_true.size
+    if n_samples - n_features - 1 <= 0:
+        raise ValueError(
+            f"Adjusted R² requires n_samples > n_features + 1 "
+            f"(got n_samples={n_samples}, n_features={n_features})."
+        )
     r2 = r_squared(y_true, y_pred)
     return 1 - ((1 - r2) * (n_samples - 1) / (n_samples - n_features - 1))
 
@@ -151,10 +171,20 @@ def f_statistic(y_true: np.ndarray, y_pred: np.ndarray, n_features: int) -> floa
 
     Returns:
     float: The F-statistic value.
+
+    Raises:
+    ValueError: If the fit is perfect (RSS = 0) or if
+        n_samples <= n_features + 1; the statistic is undefined in both cases.
     """
-    if y_true.shape != y_pred.shape:
-        raise ValueError("Shapes of y_true and y_pred must be the same.")
+    y_true, y_pred = _as_arrays(y_true, y_pred)
     n_samples = y_true.size
+    if n_samples - n_features - 1 <= 0:
+        raise ValueError(
+            f"F-statistic requires n_samples > n_features + 1 "
+            f"(got n_samples={n_samples}, n_features={n_features})."
+        )
     rss = squared_loss(y_true, y_pred)
     tss = total_sum_of_squares(y_true)
+    if rss == 0:
+        raise ValueError("F-statistic is undefined for a perfect fit (RSS = 0).")
     return ((tss - rss) / n_features) / (rss / (n_samples - n_features - 1))

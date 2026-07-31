@@ -28,6 +28,13 @@ from kai.visualization import (
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
+# Standardizing changes the geometry of the loss surface: it pulls the Hessian
+# condition number toward 1, which raises the stable step size by orders of
+# magnitude. A learning rate tuned for raw columns is therefore far too small
+# once Z-scoring is on (and vice versa), so each mode carries its own default.
+RAW_LEARNING_RATE = 0.0003
+STANDARDIZED_LEARNING_RATE = 0.05
+
 # layout geometry (not part of the theme: themes change looks, not structure)
 DATA_PANEL_WIDTH = 430
 CONFIG_PANEL_WIDTH = 231  # 165 * 1.4
@@ -395,12 +402,23 @@ class TrainingApp(tk.Tk):
         self._restyle_toolbar()
 
     def _build_metrics_panel(self, parent) -> None:
-        self.metrics_tree = ttk.Treeview(parent, columns=("metric", "value"), show="headings", height=6)
+        # honest framing: there is no train/test split here, so these numbers
+        # describe fit on the training data, not generalization (ISLR ch. 2)
+        ttk.Label(
+            parent,
+            text="In-sample metrics: computed on the training data, so they measure fit, "
+                 "not generalization to unseen data.",
+            style="Small.TLabel", wraplength=520, justify="left",
+        ).pack(side="bottom", fill="x", pady=(6, 0))
+
+        tree_row = ttk.Frame(parent)
+        tree_row.pack(side="top", fill="both", expand=True)
+        self.metrics_tree = ttk.Treeview(tree_row, columns=("metric", "value"), show="headings", height=6)
         self.metrics_tree.heading("metric", text="Metric")
         self.metrics_tree.heading("value", text="Value")
         self.metrics_tree.column("metric", anchor="w", width=180)
         self.metrics_tree.column("value", anchor="e", width=120)
-        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=self.metrics_tree.yview)
+        scrollbar = ttk.Scrollbar(tree_row, orient="vertical", command=self.metrics_tree.yview)
         self.metrics_tree.configure(yscrollcommand=scrollbar.set)
         self.metrics_tree.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -435,21 +453,28 @@ class TrainingApp(tk.Tk):
         body = ttk.Frame(config_tab)
         body.pack(fill="both", expand=True, padx=6, pady=6)
 
-        self.learning_rate_var = tk.StringVar(value="0.0003")
+        self.learning_rate_var = tk.StringVar(value=str(RAW_LEARNING_RATE))
         self.epochs_var = tk.StringVar(value="10000")
         self.batch_size_var = tk.StringVar(value="100")
-        self.tolerance_var = tk.StringVar(value="1e-6")
+        self.tolerance_var = tk.StringVar(value="1e-4")
         self.standardize_var = tk.BooleanVar(value=False)
 
-        self._slider_field(body, "Learning Rate", self.learning_rate_var, 0.00001, 0.1)
+        self._slider_field(body, "Learning Rate", self.learning_rate_var, 0.00001, 0.5)
         self._slider_field(body, "Epochs", self.epochs_var, 10, 50000, is_int=True)
         self._slider_field(body, "Batch Size", self.batch_size_var, 1, 500, is_int=True)
         self._entry_field(body, "Stop Tolerance", self.tolerance_var)
 
         ttk.Separator(body, orient="horizontal").pack(fill="x", pady=10)
         ttk.Checkbutton(
-            body, text="Standardize\nfeatures (Z-score)", variable=self.standardize_var
+            body, text="Standardize\nfeatures (Z-score)", variable=self.standardize_var,
+            command=self._on_standardize_toggled,
         ).pack(anchor="w")
+        ttk.Label(
+            body,
+            text=("Z-scoring rescales the problem,\nso the learning rate is reset\n"
+                  "to a value suited to it."),
+            style="Small.TLabel", justify="left",
+        ).pack(anchor="w", pady=(4, 0))
 
         self.logs_text = tk.Text(logs_tab, wrap="word", height=10, state="disabled",
                                   bg=palette.cell_bg, fg=palette.text_fg, font=fonts.mono)
@@ -489,6 +514,16 @@ class TrainingApp(tk.Tk):
         entry.bind("<Return>", on_entry)
         entry.bind("<FocusOut>", on_entry)
         on_entry()
+
+    def _on_standardize_toggled(self) -> None:
+        """Reset the learning rate to the default that suits the new scale."""
+        enabled = bool(self.standardize_var.get())
+        recommended = STANDARDIZED_LEARNING_RATE if enabled else RAW_LEARNING_RATE
+        self.learning_rate_var.set(str(recommended))
+        self.log(
+            f"Standardization {'enabled' if enabled else 'disabled'}; "
+            f"learning rate reset to {recommended}"
+        )
 
     def _entry_field(self, parent, text: str, var: tk.StringVar) -> None:
         ttk.Label(parent, text=text, style="Small.TLabel").pack(anchor="w", pady=(8, 1))

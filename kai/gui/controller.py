@@ -57,6 +57,7 @@ class TrainingController:
                 epochs=hp.epochs,
                 tolerance=hp.tolerance,
                 standardize_features=hp.standardize_features,
+                random_state=hp.random_state,
                 show_plot=False,
             )
             result = TrainingResult(
@@ -104,8 +105,9 @@ def build_results_report(result: TrainingResult) -> str:
         f"  learning rate   : {hp.learning_rate}",
         f"  batch size      : {hp.batch_size}",
         f"  max epochs      : {hp.epochs}",
-        f"  stop tolerance  : {hp.tolerance}",
+        f"  stop tolerance  : {hp.tolerance} (relative: ||grad|| <= tol * ||grad_initial||)",
         f"  standardization : {'enabled (z-score)' if hp.standardize_features else 'disabled'}",
+        f"  random state    : {hp.random_state if hp.random_state is not None else 'unseeded (not reproducible)'}",
         "",
         "Training",
         f"  epochs run      : {result.epochs_run}",
@@ -117,10 +119,15 @@ def build_results_report(result: TrainingResult) -> str:
     ]
     if hp.standardize_features:
         lines.append("  (weights are in standardized feature space; predict() re-applies the scaling)")
-    lines += ["", "Metrics"]
+    lines += ["", "Metrics (in-sample)"]
     for name, value in metrics_rows(result.y_true, result.y_pred, len(request.features)):
         lines.append(f"  {name:<18}: {value:.6f}")
-    lines.append("")
+    lines += [
+        "",
+        "  Note: computed on the training data itself - no train/test split - so they",
+        "  measure goodness of fit, not generalization to unseen data.",
+        "",
+    ]
     return "\n".join(lines)
 
 

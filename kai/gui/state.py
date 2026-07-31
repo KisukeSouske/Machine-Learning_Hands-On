@@ -11,11 +11,19 @@ import numpy as np
 
 @dataclass(frozen=True)
 class Hyperparameters:
+    """One training configuration.
+
+    `tolerance` is relative: training stops once the gradient norm falls to
+    this fraction of its initial magnitude. `random_state` seeds the mini-batch
+    shuffle; None means each run reshuffles differently.
+    """
+
     learning_rate: float
     batch_size: int
     epochs: int
     tolerance: float
     standardize_features: bool
+    random_state: int | None = None
 
 
 @dataclass(frozen=True)

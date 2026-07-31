@@ -49,10 +49,37 @@ class Model:
         learning_rate: float,
         batch_size: int = 100,
         epochs: int = 10_000,
-        tolerance: float = 1e-6,
+        tolerance: float = 1e-4,
         show_plot: bool = True,
         standardize_features: bool = False,
+        random_state: int | None = None,
     ) -> None:
+        """Fit weights and bias by mini-batch gradient descent.
+
+        Parameters:
+        features (list[str]): Feature column names to use as predictors.
+        learning_rate (float): Step size. Must satisfy lr < 2/lambda_max of the
+            MSE Hessian or training diverges; standardizing features raises that
+            ceiling dramatically (see `standardize_features`).
+        batch_size (int): Samples per gradient step. Values >= n_samples make
+            this plain full-batch gradient descent.
+        epochs (int): Maximum passes over the data; a safety ceiling, not a target.
+        tolerance (float): Relative convergence threshold. Training stops when
+            ||grad|| <= tolerance * ||grad_initial||. Being relative to the
+            starting gradient makes it invariant to the scale of y and of the
+            features, unlike an absolute threshold on the loss delta.
+        show_plot (bool): Open the standalone matplotlib dashboard when done.
+        standardize_features (bool): Z-score the predictors before training.
+            Recommended whenever features live on different scales: it drives
+            the Hessian condition number toward 1, which is what lets a single
+            learning rate work for every column (ISLR, p.179).
+        random_state (int | None): Seed for the per-epoch batch shuffle. Pass an
+            int for reproducible runs; None (default) reshuffles differently
+            every call.
+
+        Raises:
+        ValueError: If the loss becomes non-finite, i.e. training diverged.
+        """
         self._loss_history = []
         weight = np.zeros(len(features))
         bias = 0
@@ -69,8 +96,13 @@ class Model:
             self._feature_mean = self._feature_std = None
 
         n_samples = len(X)
-        last_epoch_loss = float('inf')
-        rng = np.random.default_rng()
+        rng = np.random.default_rng(random_state)
+
+        # Reference magnitude for the convergence test, measured at the STARTING
+        # parameters (before any update). Taking it after the first epoch would
+        # be self-defeating: a run that converges immediately would compare its
+        # already-tiny gradient against itself and never satisfy the threshold.
+        initial_gradient_norm = self._gradient_norm(y_full, bias + x_full @ weight, x_full) or 1.0
 
         for epoch in range(epochs):
             indices = rng.permutation(n_samples)
@@ -88,16 +120,19 @@ class Model:
             if not np.isfinite(epoch_loss):
                 raise ValueError(
                     f"Training diverged at epoch {epoch}: loss became {epoch_loss}. "
-                    f"Try a smaller learning_rate (current={learning_rate}) or normalize the feature values."
+                    f"Try a smaller learning_rate (current={learning_rate}) or enable "
+                    f"standardize_features."
                 )
             self._loss_history.append(epoch_loss)
 
-            # early stopping on how much the loss still moves between epochs:
-            # in practice this triggers, while a gradient-norm threshold stays
-            # above 1e-6 for far longer and never stops before max epochs
-            if abs(epoch_loss - last_epoch_loss) < tolerance:
+            # Converged when the full-dataset gradient has shrunk to a small
+            # FRACTION of where it started. A flat loss delta is not enough on
+            # its own: in an ill-conditioned problem the loss can stall while
+            # parameters are still far from the optimum. Measuring the gradient
+            # relative to its initial magnitude also makes the criterion
+            # independent of the units of y and of the features.
+            if self._gradient_norm(y_full, y_pred_full, x_full) <= tolerance * initial_gradient_norm:
                 break
-            last_epoch_loss = epoch_loss
 
         self._weight, self._bias = weight, bias
 
@@ -108,6 +143,12 @@ class Model:
                 self.predict(self._x_train),
                 n_features=len(features),
             )
+
+    @staticmethod
+    def _gradient_norm(y_true: np.ndarray, y_pred: np.ndarray, x: np.ndarray) -> float:
+        """Euclidean norm of the full MSE gradient (weights and bias together)."""
+        weight_slope, bias_slope = mean_squared_error_derivation(y_true, y_pred, x)
+        return float(np.sqrt(np.sum(weight_slope ** 2) + bias_slope ** 2))
 
     def predict(self, x: np.ndarray) -> np.ndarray:
         x = np.asarray(x, dtype=float)

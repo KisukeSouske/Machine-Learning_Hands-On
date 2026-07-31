@@ -105,20 +105,44 @@ def test_start_training_converges_on_single_feature_linear_data(tmp_path):
     assert model.loss_history[-1] < model.loss_history[0]
 
 
-def test_start_training_converges_on_multiple_features(tmp_path):
+def _multi_feature_csv(tmp_path):
+    """y = 2*x1 + 3*x2 + 5, no noise, both predictors on the same scale."""
     rng = np.random.default_rng(0)
     x1 = rng.uniform(0, 20, 60)
     x2 = rng.uniform(0, 20, 60)
     y = 2 * x1 + 3 * x2 + 5
-    rows = list(zip(x1, x2, y))
-    csv_path = _write_csv(tmp_path / "data.csv", rows, header=("x1", "x2", "y"))
+    return _write_csv(tmp_path / "data.csv", list(zip(x1, x2, y)), header=("x1", "x2", "y"))
+
+
+def test_start_training_converges_on_multiple_features_raw(tmp_path):
+    csv_path = _multi_feature_csv(tmp_path)
     model = Model(csv_path, "y")
     # batch_size (default) >= n_samples => full-batch gradient descent, which is
-    # deterministic (the epoch shuffle doesn't change a full-batch sum), unlike
-    # mini-batch SGD whose unseeded shuffling makes the trajectory non-reproducible
-    model.start_training(["x1", "x2"], learning_rate=0.0015, epochs=50_000, show_plot=False)
+    # deterministic (the epoch shuffle doesn't change a full-batch sum).
+    # Raw (unscaled) columns make the loss surface ill-conditioned, so recovering
+    # the intercept needs a much tighter tolerance than the default.
+    model.start_training(["x1", "x2"], learning_rate=0.0015, epochs=50_000,
+                         tolerance=1e-6, show_plot=False)
     assert model.weight == pytest.approx([2.0, 3.0], abs=0.05)
     assert model.bias == pytest.approx(5.0, abs=0.5)
+
+
+def test_standardized_training_reaches_same_answer_far_faster(tmp_path):
+    """The audit's core finding, pinned as a test: Z-scoring conditions the
+    problem so well that it needs orders of magnitude fewer epochs than the
+    raw run above to recover the same coefficients."""
+    csv_path = _multi_feature_csv(tmp_path)
+    model = Model(csv_path, "y")
+    model.start_training(["x1", "x2"], learning_rate=0.1, epochs=50_000,
+                         show_plot=False, standardize_features=True, random_state=0)
+
+    # translate the standardized-space coefficients back to raw space
+    weights_raw = model.weight / model._feature_std
+    bias_raw = model.bias - np.sum(model.weight * model._feature_mean / model._feature_std)
+
+    assert weights_raw == pytest.approx([2.0, 3.0], abs=0.01)
+    assert bias_raw == pytest.approx(5.0, abs=0.05)
+    assert len(model.loss_history) < 500
 
 
 def test_start_training_with_standardization_converges(tmp_path):
