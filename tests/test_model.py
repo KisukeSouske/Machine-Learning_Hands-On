@@ -28,8 +28,7 @@ def test_get_data_reads_multiple_features(tmp_path):
     csv_path = _write_csv(
         tmp_path / "data.csv",
         [(1, 10, 100), (2, 20, 200)],
-        header=("x1", "x2", "y"),
-    )
+        header=("x1", "x2", "y"))
     model = Model(csv_path, "y")
     X, y = model.get_data("y", ["x1", "x2"])
     pd.testing.assert_frame_equal(X, pd.DataFrame({"x1": [1, 2], "x2": [10, 20]}))
@@ -99,7 +98,7 @@ def test_start_training_converges_on_single_feature_linear_data(tmp_path):
     rows = [(x, 2 * x + 5) for x in range(20)]
     csv_path = _write_csv(tmp_path / "data.csv", rows)
     model = Model(csv_path, "y")
-    model.start_training(["x"], learning_rate=0.001, show_plot=False)
+    model.start_training(["x"], learning_rate=0.001)
     assert model.weight == pytest.approx([2.0], abs=0.05)
     assert model.bias == pytest.approx(5.0, abs=0.5)
     assert model.loss_history[-1] < model.loss_history[0]
@@ -122,7 +121,7 @@ def test_start_training_converges_on_multiple_features_raw(tmp_path):
     # Raw (unscaled) columns make the loss surface ill-conditioned, so recovering
     # the intercept needs a much tighter tolerance than the default.
     model.start_training(["x1", "x2"], learning_rate=0.0015, epochs=50_000,
-                         tolerance=1e-6, show_plot=False)
+                         tolerance=1e-6)
     assert model.weight == pytest.approx([2.0, 3.0], abs=0.05)
     assert model.bias == pytest.approx(5.0, abs=0.5)
 
@@ -134,7 +133,7 @@ def test_standardized_training_reaches_same_answer_far_faster(tmp_path):
     csv_path = _multi_feature_csv(tmp_path)
     model = Model(csv_path, "y")
     model.start_training(["x1", "x2"], learning_rate=0.1, epochs=50_000,
-                         show_plot=False, standardize_features=True, random_state=0)
+                         standardize_features=True, random_state=0)
 
     # translate the standardized-space coefficients back to raw space
     weights_raw = model.weight / model._feature_std
@@ -155,7 +154,7 @@ def test_start_training_with_standardization_converges(tmp_path):
     rows = list(zip(x1, x2, y))
     csv_path = _write_csv(tmp_path / "data.csv", rows, header=("x1", "x2", "y"))
     model = Model(csv_path, "y")
-    model.start_training(["x1", "x2"], learning_rate=0.1, epochs=5000, show_plot=False,
+    model.start_training(["x1", "x2"], learning_rate=0.1, epochs=5000,
                          standardize_features=True)
     # predictions must be accurate in the ORIGINAL feature space
     predictions = model.predict(model.x_train)
@@ -166,7 +165,7 @@ def test_predict_applies_training_standardization_to_new_data(tmp_path):
     rows = [(x, 2 * x + 5) for x in range(20)]
     csv_path = _write_csv(tmp_path / "data.csv", rows)
     model = Model(csv_path, "y")
-    model.start_training(["x"], learning_rate=0.1, epochs=5000, show_plot=False,
+    model.start_training(["x"], learning_rate=0.1, epochs=5000,
                          standardize_features=True)
     # a raw (unstandardized) input must still map to the right prediction
     assert model.predict(np.array([[10.0]])) == pytest.approx([25.0], abs=0.2)
@@ -176,11 +175,11 @@ def test_start_training_without_standardization_clears_previous_scaling(tmp_path
     rows = [(x, 2 * x + 5) for x in range(20)]
     csv_path = _write_csv(tmp_path / "data.csv", rows)
     model = Model(csv_path, "y")
-    model.start_training(["x"], learning_rate=0.1, epochs=2000, show_plot=False,
+    model.start_training(["x"], learning_rate=0.1, epochs=2000,
                          standardize_features=True)
     assert model._feature_mean is not None
 
-    model.start_training(["x"], learning_rate=0.001, epochs=2000, show_plot=False,
+    model.start_training(["x"], learning_rate=0.001, epochs=2000,
                          standardize_features=False)
     assert model._feature_mean is None
     assert model.predict(np.array([[10.0]])) == pytest.approx([25.0], abs=0.5)
@@ -190,9 +189,9 @@ def test_start_training_resets_loss_history_between_runs(tmp_path):
     rows = [(x, 2 * x + 5) for x in range(20)]
     csv_path = _write_csv(tmp_path / "data.csv", rows)
     model = Model(csv_path, "y")
-    model.start_training(["x"], learning_rate=0.001, show_plot=False)
+    model.start_training(["x"], learning_rate=0.001)
     first_run_length = len(model.loss_history)
-    model.start_training(["x"], learning_rate=0.001, show_plot=False)
+    model.start_training(["x"], learning_rate=0.001)
     assert len(model.loss_history) == first_run_length
 
 
@@ -200,5 +199,5 @@ def test_start_training_stops_at_epochs(tmp_path):
     rows = [(x, 2 * x + 5) for x in range(20)]
     csv_path = _write_csv(tmp_path / "data.csv", rows)
     model = Model(csv_path, "y")
-    model.start_training(["x"], learning_rate=0.001, epochs=3, show_plot=False)
+    model.start_training(["x"], learning_rate=0.001, epochs=3)
     assert len(model.loss_history) == 3

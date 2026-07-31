@@ -58,7 +58,6 @@ class TrainingController:
                 tolerance=hp.tolerance,
                 standardize_features=hp.standardize_features,
                 random_state=hp.random_state,
-                show_plot=False,
             )
             result = TrainingResult(
                 request=request,
