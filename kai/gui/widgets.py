@@ -330,6 +330,67 @@ class MultiSelectDropdown(ttk.Frame):
         self._listbox = None
 
 
+class HelpHint(tk.Canvas):
+    """A tiny circular "?" badge that shows a tooltip on hover.
+
+    Themed to match the tab palette (blue-ish circle with white "?"). The
+    tooltip is a borderless Toplevel so it can appear over any other widget,
+    and is only alive while the mouse is on the badge.
+    """
+
+    def __init__(self, parent, theme: Theme, tooltip: str, size: int = 14):
+        super().__init__(parent, width=size, height=size, highlightthickness=0, bd=0,
+                         bg=theme.palette.panel_bg, cursor="question_arrow")
+        self._theme = theme
+        self._tooltip_text = tooltip
+        self._tip: tk.Toplevel | None = None
+        self._size = size
+        self.bind("<Enter>", self._show_tip)
+        self.bind("<Leave>", self._hide_tip)
+        self.bind("<Configure>", lambda _e: self._redraw())
+
+    def set_tooltip(self, tooltip: str) -> None:
+        self._tooltip_text = tooltip
+        # if the tip is currently visible, refresh it in place
+        if self._tip is not None and self._tip.winfo_exists():
+            self._hide_tip()
+            self._show_tip()
+
+    def _redraw(self) -> None:
+        palette = self._theme.palette
+        self.delete("all")
+        s = self._size
+        # circle + "?" glyph, using tab active colors so it reads as "interactive"
+        self.create_oval(1, 1, s - 1, s - 1, fill=palette.tab_active_stops[0],
+                        outline=palette.tab_border)
+        self.create_text(s / 2, s / 2 + 0.5, text="?", fill=palette.tab_active_fg,
+                        font=(self._theme.fonts.body_bold[0], max(7, s - 6), "bold"))
+
+    def _show_tip(self, _event=None) -> None:
+        if self._tip is not None or not self._tooltip_text:
+            return
+        palette, fonts = self._theme.palette, self._theme.fonts
+        tip = tk.Toplevel(self)
+        tip.overrideredirect(True)
+        # anchor slightly below and to the right of the badge, so the cursor
+        # doesn't cover it
+        x = self.winfo_rootx() + self._size + 4
+        y = self.winfo_rooty() + self._size + 4
+        tip.wm_geometry(f"+{x}+{y}")
+        frame = tk.Frame(tip, bg=palette.panel_border)
+        frame.pack()
+        tk.Label(
+            frame, text=self._tooltip_text, bg=palette.cell_bg, fg=palette.text_fg,
+            font=fonts.small, wraplength=280, justify="left", padx=8, pady=6,
+        ).pack(padx=1, pady=1)
+        self._tip = tip
+
+    def _hide_tip(self, _event=None) -> None:
+        if self._tip is not None and self._tip.winfo_exists():
+            self._tip.destroy()
+        self._tip = None
+
+
 class ChartTabBar(tk.Frame):
     """Tab-looking toggles: any number can be active at once (unlike a real
     Notebook, which is exclusive)."""

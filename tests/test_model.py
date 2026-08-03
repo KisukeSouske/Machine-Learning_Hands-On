@@ -1,10 +1,12 @@
+"""Tests for the new Model API: prediction object built by two factories,
+one per estimation method.
+"""
 import csv
 
 import numpy as np
-import pandas as pd
 import pytest
 
-from kai.model import Model
+from kai.model import Model, TrainedModel
 
 
 def _write_csv(path, rows, header=("x", "y")):
@@ -13,95 +15,6 @@ def _write_csv(path, rows, header=("x", "y")):
         writer.writerow(header)
         writer.writerows(rows)
     return str(path)
-
-
-# Test cases for get_data
-def test_get_data_reads_single_feature(tmp_path):
-    csv_path = _write_csv(tmp_path / "data.csv", [(1, 10), (2, 20), (3, 30)])
-    model = Model(csv_path, "y")
-    X, y = model.get_data("y", ["x"])
-    pd.testing.assert_frame_equal(X, pd.DataFrame({"x": [1, 2, 3]}))
-    pd.testing.assert_series_equal(y, pd.Series([10, 20, 30], name="y"))
-
-
-def test_get_data_reads_multiple_features(tmp_path):
-    csv_path = _write_csv(
-        tmp_path / "data.csv",
-        [(1, 10, 100), (2, 20, 200)],
-        header=("x1", "x2", "y"))
-    model = Model(csv_path, "y")
-    X, y = model.get_data("y", ["x1", "x2"])
-    pd.testing.assert_frame_equal(X, pd.DataFrame({"x1": [1, 2], "x2": [10, 20]}))
-    pd.testing.assert_series_equal(y, pd.Series([100, 200], name="y"))
-
-
-def test_get_data_missing_column_raises(tmp_path):
-    csv_path = _write_csv(tmp_path / "data.csv", [(1, 10)])
-    model = Model(csv_path, "y")
-    with pytest.raises(KeyError):
-        model.get_data("y", ["does_not_exist"])
-
-
-# weight/bias/loss_history should be read-only from outside the class
-def test_weight_bias_loss_history_have_no_public_setter():
-    model = Model("unused.csv", "y")
-    with pytest.raises(AttributeError):
-        model.weight = 2.0
-    with pytest.raises(AttributeError):
-        model.bias = 5.0
-    with pytest.raises(AttributeError):
-        model.loss_history = [1.0]
-
-
-def test_loss_history_property_returns_a_copy():
-    model = Model("unused.csv", "y")
-    model._loss_history = [1.0, 2.0]
-    returned = model.loss_history
-    returned.append(999.0)
-    assert model.loss_history == [1.0, 2.0]
-
-
-# Test cases for predict
-def test_predict_single_feature_batch():
-    model = Model("unused.csv", "y")
-    model._weight = np.array([2.0])
-    model._bias = 5.0
-    result = model.predict(np.array([[0.0], [1.0], [2.0]]))
-    assert list(result) == [5.0, 7.0, 9.0]
-
-
-def test_predict_single_feature_one_sample():
-    model = Model("unused.csv", "y")
-    model._weight = np.array([2.0])
-    model._bias = 5.0
-    assert model.predict(np.array([10.0])) == 25.0
-
-
-def test_predict_multiple_features_batch():
-    model = Model("unused.csv", "y")
-    model._weight = np.array([2.0, 3.0])
-    model._bias = 1.0
-    result = model.predict(np.array([[1.0, 1.0], [2.0, 1.0]]))
-    # [1 + 2*1 + 3*1, 1 + 2*2 + 3*1] = [6, 8]
-    assert list(result) == [6.0, 8.0]
-
-
-def test_predict_multiple_features_one_sample():
-    model = Model("unused.csv", "y")
-    model._weight = np.array([2.0, 3.0])
-    model._bias = 1.0
-    assert model.predict(np.array([1.0, 1.0])) == 6.0
-
-
-# Test cases for start_training
-def test_start_training_converges_on_single_feature_linear_data(tmp_path):
-    rows = [(x, 2 * x + 5) for x in range(20)]
-    csv_path = _write_csv(tmp_path / "data.csv", rows)
-    model = Model(csv_path, "y")
-    model.start_training(["x"], learning_rate=0.001)
-    assert model.weight == pytest.approx([2.0], abs=0.05)
-    assert model.bias == pytest.approx(5.0, abs=0.5)
-    assert model.loss_history[-1] < model.loss_history[0]
 
 
 def _multi_feature_csv(tmp_path):
@@ -113,91 +26,147 @@ def _multi_feature_csv(tmp_path):
     return _write_csv(tmp_path / "data.csv", list(zip(x1, x2, y)), header=("x1", "x2", "y"))
 
 
-def test_start_training_converges_on_multiple_features_raw(tmp_path):
+# ---------------- data loading ----------------
+def test_load_columns_reads_features_as_2d_array(tmp_path):
+    csv_path = _write_csv(tmp_path / "data.csv", [(1, 10), (2, 20), (3, 30)])
+    X, y = Model.load_columns(csv_path, "y", ["x"])
+    assert X.shape == (3, 1)
+    assert X[:, 0].tolist() == [1.0, 2.0, 3.0]
+    assert y.tolist() == [10.0, 20.0, 30.0]
+
+
+def test_load_columns_missing_column_raises(tmp_path):
+    csv_path = _write_csv(tmp_path / "data.csv", [(1, 10)])
+    with pytest.raises(KeyError):
+        Model.load_columns(csv_path, "y", ["does_not_exist"])
+
+
+# ---------------- predict (state-only tests, no factory) ----------------
+def _bare_model(weights, bias, mean=None, std=None) -> Model:
+    """Build a Model directly, bypassing the factories, for predict-only tests."""
+    return Model(
+        csv_file="unused.csv", label_column="y", features=["x"] * len(weights),
+        x_train=np.zeros((1, len(weights))), y_train=np.zeros(1),
+        weights=np.asarray(weights, dtype=float), bias=bias,
+        feature_mean=mean, feature_std=std,
+    )
+
+
+def test_predict_single_feature_batch():
+    model = _bare_model([2.0], 5.0)
+    assert model.predict(np.array([[0.0], [1.0], [2.0]])).tolist() == [5.0, 7.0, 9.0]
+
+
+def test_predict_multiple_features_batch():
+    model = _bare_model([2.0, 3.0], 1.0)
+    result = model.predict(np.array([[1.0, 1.0], [2.0, 1.0]]))
+    # [1 + 2*1 + 3*1, 1 + 2*2 + 3*1] = [6, 8]
+    assert result.tolist() == [6.0, 8.0]
+
+
+def test_predict_reapplies_training_standardization():
+    # a model whose weights live in standardized space still predicts correctly
+    # from raw inputs, because predict() reapplies the training mean/std
+    model = _bare_model([1.0], 0.0, mean=np.array([5.0]), std=np.array([2.0]))
+    assert model.predict(np.array([[9.0]])) == pytest.approx([2.0])  # (9-5)/2 = 2, * 1 + 0
+
+
+# ---------------- read-only properties ----------------
+def test_weight_bias_have_no_public_setter():
+    model = _bare_model([2.0], 5.0)
+    with pytest.raises(AttributeError):
+        model.weight = np.array([1.0])
+    with pytest.raises(AttributeError):
+        model.bias = 0.0
+
+
+def test_train_arrays_are_returned_as_copies():
+    model = _bare_model([1.0], 0.0)
+    returned = model.x_train
+    returned.fill(999.0)
+    assert model.x_train.tolist() == [[0.0]]
+
+
+# ---------------- fit_gradient_descent factory ----------------
+def test_fit_gradient_descent_returns_trained_model_with_loss_history(tmp_path):
     csv_path = _multi_feature_csv(tmp_path)
-    model = Model(csv_path, "y")
-    # batch_size (default) >= n_samples => full-batch gradient descent, which is
-    # deterministic (the epoch shuffle doesn't change a full-batch sum).
-    # Raw (unscaled) columns make the loss surface ill-conditioned, so recovering
-    # the intercept needs a much tighter tolerance than the default.
-    model.start_training(["x1", "x2"], learning_rate=0.0015, epochs=50_000,
-                         tolerance=1e-6)
-    assert model.weight == pytest.approx([2.0, 3.0], abs=0.05)
-    assert model.bias == pytest.approx(5.0, abs=0.5)
+    trained = Model.fit_gradient_descent(csv_path, "y", ["x1", "x2"],
+                                          learning_rate=0.1, epochs=1000,
+                                          standardize_features=True, random_state=0)
+    assert isinstance(trained, TrainedModel)
+    assert trained.method == "gd"
+    assert trained.loss_history is not None
+    assert trained.loss_history[-1] < trained.loss_history[0]
 
 
-def test_standardized_training_reaches_same_answer_far_faster(tmp_path):
-    """The audit's core finding, pinned as a test: Z-scoring conditions the
-    problem so well that it needs orders of magnitude fewer epochs than the
-    raw run above to recover the same coefficients."""
+def test_fit_gradient_descent_recovers_coefficients_on_noiseless_data(tmp_path):
     csv_path = _multi_feature_csv(tmp_path)
-    model = Model(csv_path, "y")
-    model.start_training(["x1", "x2"], learning_rate=0.1, epochs=50_000,
-                         standardize_features=True, random_state=0)
-
+    trained = Model.fit_gradient_descent(csv_path, "y", ["x1", "x2"],
+                                          learning_rate=0.1, epochs=50_000,
+                                          standardize_features=True, random_state=0)
+    model = trained.model
     # translate the standardized-space coefficients back to raw space
-    weights_raw = model.weight / model._feature_std
-    bias_raw = model.bias - np.sum(model.weight * model._feature_mean / model._feature_std)
-
+    weights_raw = model.weight / model.feature_std
+    bias_raw = model.bias - np.sum(model.weight * model.feature_mean / model.feature_std)
     assert weights_raw == pytest.approx([2.0, 3.0], abs=0.01)
     assert bias_raw == pytest.approx(5.0, abs=0.05)
-    assert len(model.loss_history) < 500
+    assert len(trained.loss_history) < 500
 
 
-def test_start_training_with_standardization_converges(tmp_path):
-    # features on wildly different scales: raw gradient descent struggles here,
-    # standardization is what makes a sane learning rate work
-    rng = np.random.default_rng(0)
-    x1 = rng.uniform(0, 1000, 80)
-    x2 = rng.uniform(0, 1, 80)
-    y = 0.5 * x1 + 20 * x2 + 3
-    rows = list(zip(x1, x2, y))
-    csv_path = _write_csv(tmp_path / "data.csv", rows, header=("x1", "x2", "y"))
-    model = Model(csv_path, "y")
-    model.start_training(["x1", "x2"], learning_rate=0.1, epochs=5000,
-                         standardize_features=True)
-    # predictions must be accurate in the ORIGINAL feature space
-    predictions = model.predict(model.x_train)
-    assert predictions == pytest.approx(model.y_train, abs=0.5)
+def test_fit_gradient_descent_without_standardization_leaves_scaling_none(tmp_path):
+    csv_path = _write_csv(tmp_path / "data.csv", [(x, 2 * x + 5) for x in range(20)])
+    trained = Model.fit_gradient_descent(csv_path, "y", ["x"],
+                                          learning_rate=0.001, epochs=2000)
+    assert trained.model.feature_mean is None
+    assert trained.model.feature_std is None
 
 
-def test_predict_applies_training_standardization_to_new_data(tmp_path):
-    rows = [(x, 2 * x + 5) for x in range(20)]
-    csv_path = _write_csv(tmp_path / "data.csv", rows)
-    model = Model(csv_path, "y")
-    model.start_training(["x"], learning_rate=0.1, epochs=5000,
-                         standardize_features=True)
-    # a raw (unstandardized) input must still map to the right prediction
-    assert model.predict(np.array([[10.0]])) == pytest.approx([25.0], abs=0.2)
+def test_fit_gradient_descent_predict_matches_raw_targets(tmp_path):
+    csv_path = _write_csv(tmp_path / "data.csv", [(x, 2 * x + 5) for x in range(20)])
+    trained = Model.fit_gradient_descent(csv_path, "y", ["x"],
+                                          learning_rate=0.1, epochs=5000,
+                                          standardize_features=True, random_state=0)
+    assert trained.model.predict(np.array([[10.0]])) == pytest.approx([25.0], abs=0.2)
 
 
-def test_start_training_without_standardization_clears_previous_scaling(tmp_path):
-    rows = [(x, 2 * x + 5) for x in range(20)]
-    csv_path = _write_csv(tmp_path / "data.csv", rows)
-    model = Model(csv_path, "y")
-    model.start_training(["x"], learning_rate=0.1, epochs=2000,
-                         standardize_features=True)
-    assert model._feature_mean is not None
-
-    model.start_training(["x"], learning_rate=0.001, epochs=2000,
-                         standardize_features=False)
-    assert model._feature_mean is None
-    assert model.predict(np.array([[10.0]])) == pytest.approx([25.0], abs=0.5)
+# ---------------- fit_ols factory ----------------
+def test_fit_ols_returns_trained_model_without_loss_history(tmp_path):
+    csv_path = _multi_feature_csv(tmp_path)
+    trained = Model.fit_ols(csv_path, "y", ["x1", "x2"])
+    assert isinstance(trained, TrainedModel)
+    assert trained.method == "ols"
+    assert trained.loss_history is None
 
 
-def test_start_training_resets_loss_history_between_runs(tmp_path):
-    rows = [(x, 2 * x + 5) for x in range(20)]
-    csv_path = _write_csv(tmp_path / "data.csv", rows)
-    model = Model(csv_path, "y")
-    model.start_training(["x"], learning_rate=0.001)
-    first_run_length = len(model.loss_history)
-    model.start_training(["x"], learning_rate=0.001)
-    assert len(model.loss_history) == first_run_length
+def test_fit_ols_recovers_exact_coefficients_on_noiseless_data(tmp_path):
+    csv_path = _multi_feature_csv(tmp_path)
+    trained = Model.fit_ols(csv_path, "y", ["x1", "x2"])
+    assert trained.model.weight == pytest.approx([2.0, 3.0], abs=1e-10)
+    assert trained.model.bias == pytest.approx(5.0, abs=1e-10)
 
 
-def test_start_training_stops_at_epochs(tmp_path):
-    rows = [(x, 2 * x + 5) for x in range(20)]
-    csv_path = _write_csv(tmp_path / "data.csv", rows)
-    model = Model(csv_path, "y")
-    model.start_training(["x"], learning_rate=0.001, epochs=3)
-    assert len(model.loss_history) == 3
+def test_fit_ols_does_not_standardize_features(tmp_path):
+    """OLS is affine-invariant, so it never touches the training scaling."""
+    csv_path = _multi_feature_csv(tmp_path)
+    trained = Model.fit_ols(csv_path, "y", ["x1", "x2"])
+    assert trained.model.feature_mean is None
+    assert trained.model.feature_std is None
+
+
+def test_fit_ols_predicts_from_raw_features(tmp_path):
+    csv_path = _multi_feature_csv(tmp_path)
+    trained = Model.fit_ols(csv_path, "y", ["x1", "x2"])
+    # y = 2*x1 + 3*x2 + 5; try x1=10, x2=4 -> 20 + 12 + 5 = 37
+    assert trained.model.predict(np.array([[10.0, 4.0]])) == pytest.approx([37.0], abs=1e-9)
+
+
+# ---------------- both methods agree on well-conditioned problems ----------------
+def test_gd_and_ols_agree_on_predictions_up_to_convergence_tolerance(tmp_path):
+    csv_path = _multi_feature_csv(tmp_path)
+    ols = Model.fit_ols(csv_path, "y", ["x1", "x2"])
+    gd = Model.fit_gradient_descent(csv_path, "y", ["x1", "x2"],
+                                     learning_rate=0.1, epochs=50_000,
+                                     standardize_features=True,
+                                     tolerance=1e-8, random_state=0)
+    same_rows = np.array([[7.0, 3.0], [1.5, 10.0]])
+    assert gd.model.predict(same_rows) == pytest.approx(ols.model.predict(same_rows), abs=1e-3)

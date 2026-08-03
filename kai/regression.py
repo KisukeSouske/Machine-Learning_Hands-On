@@ -14,12 +14,17 @@ Everything here works on plain numpy arrays: no CSV reading, no scaling, no
 matplotlib. That is what makes these callable from a script, from `Model`, or
 from a VIF routine that regresses one feature against the others.
 """
+import threading
 from dataclasses import dataclass
 
 import numpy as np
 from scipy import stats as scipy_stats
 
 from kai.metrics import mean_squared_error, mean_squared_error_derivation, r_squared, squared_loss
+
+
+class TrainingCancelled(Exception):
+    """Raised by `fit_gradient_descent` when `cancel_event` is set mid-run."""
 
 
 @dataclass(frozen=True)
@@ -173,6 +178,7 @@ def fit_gradient_descent(
     epochs: int = 10_000,
     tolerance: float = 1e-4,
     random_state: int | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> LinearFit:
     """Fit y ~ X by mini-batch gradient descent.
 
@@ -192,12 +198,17 @@ def fit_gradient_descent(
         independent of the units of y and of the features.
     random_state (int | None): Seed for the per-epoch shuffle. Pass an int for
         reproducible runs.
+    cancel_event (threading.Event | None): Checked once per epoch; when set,
+        training stops early by raising `TrainingCancelled`. None (the
+        default) means the run can never be cancelled - this keeps the
+        function callable from a plain script with no threading involved.
 
     Returns:
     LinearFit: including the per-epoch loss history.
 
     Raises:
     ValueError: If the loss becomes non-finite, i.e. training diverged.
+    TrainingCancelled: If `cancel_event` was set before training finished.
     """
     X, y = _as_design_inputs(X, y)
     n_samples, n_features = X.shape
@@ -213,6 +224,8 @@ def fit_gradient_descent(
     initial_gradient_norm = gradient_norm(y, bias + X @ weights, X) or 1.0
 
     for epoch in range(epochs):
+        if cancel_event is not None and cancel_event.is_set():
+            raise TrainingCancelled("Training was stopped by the user.")
         indices = rng.permutation(n_samples)
         for start in range(0, n_samples, batch_size):
             batch = indices[start:start + batch_size]
@@ -423,6 +436,90 @@ class InferenceSummary:
     p_values: np.ndarray
     residual_standard_error: float
     degrees_of_freedom: int
+
+
+@dataclass(frozen=True)
+class PredictionInterval:
+    """Uncertainty around a prediction at one specific input x0 (ISLR eq.
+    3.9-3.11): two different intervals, both centered on the same point
+    estimate but with different widths.
+
+    `confidence_*` bounds the MEAN response E[Y|X=x0] - the uncertainty in
+    where the regression line itself sits. `prediction_*` bounds a single NEW
+    observation at x0 - it is wider because it also includes the irreducible
+    error term (a real y at x0 scatters around the mean, even if the mean
+    were known exactly).
+    """
+
+    point_estimate: float
+    confidence_lower: float
+    confidence_upper: float
+    prediction_lower: float
+    prediction_upper: float
+    confidence_level: float
+
+
+def predict_with_intervals(
+    X, y_true, fit: LinearFit, x0, confidence_level: float = 0.95
+) -> PredictionInterval:
+    """Confidence interval (mean response) and prediction interval (new
+    observation) at a single input x0, for a fit produced by `fit_ols`
+    (statistically valid only for the exact least-squares solution - same
+    restriction as `summarize_inference`).
+
+    Parameters:
+    X (array-like): The same features the fit was made on.
+    y_true (array-like): The same target the fit was made on.
+    fit (LinearFit): Typically the result of `fit_ols(X, y_true)`.
+    x0 (array-like): One input row, shape (n_features,), in the same feature
+        space as X.
+    confidence_level (float): e.g. 0.95 for 95% intervals.
+
+    Raises:
+    ValueError: If x0's length does not match X's number of features, or if
+        there are too few samples for the residual degrees of freedom to be
+        positive.
+    """
+    X, y_true = _as_design_inputs(X, y_true)
+    x0 = np.asarray(x0, dtype=float).reshape(-1)
+    n_features = X.shape[1]
+    if x0.shape[0] != n_features:
+        raise ValueError(
+            f"x0 has {x0.shape[0]} entries but the model has {n_features} features."
+        )
+
+    design = add_intercept(X)
+    n_samples, n_coefficients = design.shape
+    degrees_of_freedom = n_samples - n_coefficients
+    if degrees_of_freedom <= 0:
+        raise ValueError(
+            f"Prediction intervals require n_samples > n_features + 1 "
+            f"(got n_samples={n_samples}, n_features={n_features})."
+        )
+
+    y_pred = fit.predict(X)
+    rse = residual_standard_error(y_true, y_pred, n_features)
+
+    # x0d^T (Xd^T Xd)^-1 x0d, via one linear solve rather than a full matrix
+    # inverse - the same "solve for what you need" approach as _inverse_diagonal.
+    normal_matrix = design.T @ design
+    x0_design = np.concatenate([[1.0], x0])
+    leverage = float(x0_design @ solve_linear_system(normal_matrix, x0_design))
+
+    point_estimate = fit.bias + float(x0 @ fit.weights)
+    alpha = 1.0 - confidence_level
+    t_crit = float(scipy_stats.t.ppf(1.0 - alpha / 2.0, df=degrees_of_freedom))
+    se_mean = rse * np.sqrt(leverage)
+    se_new_obs = rse * np.sqrt(1.0 + leverage)
+
+    return PredictionInterval(
+        point_estimate=point_estimate,
+        confidence_lower=point_estimate - t_crit * se_mean,
+        confidence_upper=point_estimate + t_crit * se_mean,
+        prediction_lower=point_estimate - t_crit * se_new_obs,
+        prediction_upper=point_estimate + t_crit * se_new_obs,
+        confidence_level=confidence_level,
+    )
 
 
 def summarize_inference(X, y_true, fit: LinearFit, feature_names: list[str] | None = None) -> InferenceSummary:

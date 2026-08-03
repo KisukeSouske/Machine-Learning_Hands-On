@@ -1,6 +1,14 @@
 import csv
 
-from kai.gui import format_elapsed, list_csv_files, read_csv_preview
+from kai.gui import (
+    count_csv_data_rows,
+    detect_csv_separator,
+    format_elapsed,
+    format_prediction,
+    humanize_column,
+    list_csv_files,
+    read_csv_preview,
+)
 
 
 def _write_csv(path, rows, header=("x", "y")):
@@ -47,6 +55,54 @@ def test_read_csv_preview_handles_fewer_rows_than_requested(tmp_path):
     assert len(preview) == 2
 
 
+# Test cases for detect_csv_separator
+def test_detect_csv_separator_comma(tmp_path):
+    path = _write_csv(tmp_path / "data.csv", [(1, 2), (3, 4)])
+    assert detect_csv_separator(path) == ","
+
+
+def test_detect_csv_separator_semicolon(tmp_path):
+    path = tmp_path / "data.csv"
+    path.write_text("x;y\n1;2\n3;4\n", encoding="utf-8")
+    assert detect_csv_separator(path) == ";"
+
+
+def test_detect_csv_separator_tab(tmp_path):
+    path = tmp_path / "data.csv"
+    path.write_text("x\ty\n1\t2\n3\t4\n", encoding="utf-8")
+    assert detect_csv_separator(path) == "\t"
+
+
+def test_detect_csv_separator_empty_file_falls_back_to_comma(tmp_path):
+    path = tmp_path / "data.csv"
+    path.write_text("", encoding="utf-8")
+    assert detect_csv_separator(path) == ","
+
+
+def test_detect_csv_separator_single_column_falls_back_to_comma(tmp_path):
+    path = tmp_path / "data.csv"
+    path.write_text("x\n1\n2\n3\n", encoding="utf-8")
+    assert detect_csv_separator(path) == ","
+
+
+# Test cases for count_csv_data_rows
+def test_count_csv_data_rows_excludes_header(tmp_path):
+    rows = [(i, i * 2) for i in range(5)]
+    path = _write_csv(tmp_path / "data.csv", rows)
+    assert count_csv_data_rows(path) == 5
+
+
+def test_count_csv_data_rows_header_only(tmp_path):
+    path = _write_csv(tmp_path / "data.csv", [])
+    assert count_csv_data_rows(path) == 0
+
+
+def test_count_csv_data_rows_empty_file(tmp_path):
+    path = tmp_path / "data.csv"
+    path.write_text("", encoding="utf-8")
+    assert count_csv_data_rows(path) == 0
+
+
 # Test cases for format_elapsed
 def test_format_elapsed_zero():
     assert format_elapsed(0) == "00:00:00"
@@ -67,3 +123,41 @@ def test_format_elapsed_rounds_centiseconds_without_overflowing():
 
 def test_format_elapsed_negative_clamps_to_zero():
     assert format_elapsed(-1.0) == "00:00:00"
+
+
+# Test cases for humanize_column
+def test_humanize_column_replaces_separators_and_lifts_first_letter():
+    assert humanize_column("taxa_oxidacao") == "Taxa oxidacao"
+    assert humanize_column("learning-rate") == "Learning rate"
+
+
+def test_humanize_column_preserves_inner_capitalisation():
+    # "O" is oxygen here, not a stray capital: str.capitalize() would eat it
+    assert humanize_column("concentracao_O") == "Concentracao O"
+
+
+def test_humanize_column_survives_degenerate_names():
+    assert humanize_column("") == ""
+    assert humanize_column("___") == "___"
+
+
+# Test cases for format_prediction
+def test_format_prediction_uses_fixed_notation_when_it_fits():
+    assert format_prediction(218.0) == "218.0000"
+    assert format_prediction(-12345.6789) == "-12,345.6789"
+
+
+def test_format_prediction_falls_back_to_scientific_when_too_wide():
+    # a plain :.4f here would be far wider than the readout and get clipped
+    assert format_prediction(1.23e12) == "1.2300e+12"
+
+
+def test_format_prediction_does_not_flatten_small_values_to_zero():
+    # 4.5e-9 must not read as an exact "0.0000"
+    assert format_prediction(4.5e-9) == "4.5000e-09"
+    assert format_prediction(0.0) == "0.0000"
+
+
+def test_format_prediction_stays_within_the_readout_budget():
+    values = [218.0, -12345.6789, 1.23e12, 4.5e-9, -9.87e-15, 0.0]
+    assert all(len(format_prediction(v)) <= 13 for v in values)

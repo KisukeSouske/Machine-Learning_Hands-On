@@ -3,11 +3,14 @@
 Ground truth for the hand-written linear solver is numpy's own solver; ground
 truth for OLS is the normal equations computed independently.
 """
+import threading
+
 import numpy as np
 import pytest
 
 from kai.regression import (
     LinearFit,
+    TrainingCancelled,
     add_intercept,
     fit_gradient_descent,
     fit_ols,
@@ -151,6 +154,24 @@ def test_gradient_descent_raises_on_divergence():
     y = np.array([1.0, 2.0, 3.0, 4.0])
     with pytest.raises(ValueError, match="diverged"):
         fit_gradient_descent(X, y, learning_rate=10.0, epochs=500)
+
+
+def test_gradient_descent_raises_training_cancelled_when_event_preset():
+    # event already set before the first epoch check -> cancels immediately
+    X = np.array([[1.0], [2.0], [3.0], [4.0]])
+    y = np.array([1.0, 2.0, 3.0, 4.0])
+    event = threading.Event()
+    event.set()
+    with pytest.raises(TrainingCancelled, match="stopped by the user"):
+        fit_gradient_descent(X, y, learning_rate=0.01, epochs=1000, cancel_event=event)
+
+
+def test_gradient_descent_ignores_cancel_event_when_none():
+    # default behavior (no cancel_event) must be unaffected
+    X = np.array([[1.0], [2.0], [3.0], [4.0]])
+    y = np.array([1.0, 2.0, 3.0, 4.0])
+    fit = fit_gradient_descent(X, y, learning_rate=0.01, epochs=50, cancel_event=None)
+    assert fit.loss_history is not None
 
 
 def test_gradient_descent_is_reproducible_with_a_seed():

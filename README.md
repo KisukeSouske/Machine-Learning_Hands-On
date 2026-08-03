@@ -58,21 +58,36 @@ mean_absolute_error(y_true, y_pred)  # erro absoluto médio (MAE)
 r_squared(y_true, y_pred)            # coeficiente de determinação
 ```
 
-Treinando um modelo:
+Treinando um modelo — dois métodos, mesma API de predição:
 
 ```python
 from kai.model import Model
 
-model = Model("data_valve_calibration.csv", label_column="Vazao_L_min")
-model.start_training(
-    ["Abertura_Valvula_Percentual"],
+# Gradiente descendente (iterativo, com hiperparâmetros e curva de perda):
+trained = Model.fit_gradient_descent(
+    "data_valve_calibration.csv",
+    label_column="Vazao_L_min",
+    features=["Abertura_Valvula_Percentual"],
     learning_rate=0.05,
     standardize_features=True,   # ver "Escolhendo a taxa de aprendizagem"
     random_state=42,             # opcional: torna a execução reprodutível
-    show_plot=False,
 )
-model.predict([[75.0]])          # entrada em escala ORIGINAL
+trained.model.predict([[75.0]])   # entrada em escala ORIGINAL
+trained.loss_history              # lista de MSE por época
+
+# OLS (forma fechada, sem hiperparâmetros, resultado exato):
+trained_ols = Model.fit_ols(
+    "data_valve_calibration.csv",
+    label_column="Vazao_L_min",
+    features=["Abertura_Valvula_Percentual"],
+)
+trained_ols.model.predict([[75.0]])
+trained_ols.loss_history          # None: OLS não itera
 ```
+
+Cada método é uma *factory* na classe `Model` que devolve um `TrainedModel`
+(uma dataclass com o `model` treinado e o `loss_history` — este último só
+existe para GD, é `None` para OLS).
 
 ## Escolhendo a taxa de aprendizagem
 

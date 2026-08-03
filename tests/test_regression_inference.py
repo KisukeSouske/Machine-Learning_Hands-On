@@ -20,9 +20,11 @@ import pytest
 import statsmodels.api as sm
 
 from kai.regression import (
+    LinearFit,
     coefficient_standard_errors,
     fit_ols,
     p_values,
+    predict_with_intervals,
     residual_standard_error,
     summarize_inference,
     t_statistics,
@@ -147,6 +149,49 @@ def test_coefficient_standard_errors_matches_statsmodels_on_synthetic_data():
     assert summary.p_values == pytest.approx(np.asarray(sm_fit.pvalues), abs=1e-6)
     # the noise feature should NOT look significant
     assert summary.p_values[3] > 0.05
+
+
+# --- 5. predict_with_intervals matches statsmodels get_prediction().summary_frame() ---
+# same worked example as the course's "PERGUNTA 4": predict for
+# TV=150, radio=30, jornal=20, report the point estimate, the 95% CI for the
+# mean response, and the 95% PI for a new observation.
+def test_predict_with_intervals_matches_statsmodels_get_prediction(advertising_data):
+    X = advertising_data[["TV", "radio", "jornal"]].to_numpy(float)
+    y = advertising_data["vendas"].to_numpy(float)
+
+    fit = fit_ols(X, y)
+    interval = predict_with_intervals(X, y, fit, x0=[150, 30, 20], confidence_level=0.95)
+
+    sm_fit = sm.OLS(y, sm.add_constant(X)).fit()
+    novo = sm.add_constant(np.array([[150, 30, 20]]), has_constant="add")
+    pred = sm_fit.get_prediction(novo).summary_frame(alpha=0.05)
+
+    assert interval.point_estimate == pytest.approx(pred["mean"][0], abs=1e-6)
+    assert interval.confidence_lower == pytest.approx(pred["mean_ci_lower"][0], abs=1e-6)
+    assert interval.confidence_upper == pytest.approx(pred["mean_ci_upper"][0], abs=1e-6)
+    assert interval.prediction_lower == pytest.approx(pred["obs_ci_lower"][0], abs=1e-6)
+    assert interval.prediction_upper == pytest.approx(pred["obs_ci_upper"][0], abs=1e-6)
+    # the prediction interval must be wider than the confidence interval - it
+    # carries the extra irreducible-error term (ISLR eq. 3.11 vs 3.10)
+    assert (interval.prediction_upper - interval.prediction_lower) > (
+        interval.confidence_upper - interval.confidence_lower
+    )
+
+
+def test_predict_with_intervals_rejects_wrong_length_x0():
+    X = np.array([[1.0, 5.0], [2.0, 3.0], [3.0, 8.0], [4.0, 1.0]])
+    y = np.array([2.0, 3.0, 5.0, 4.0])
+    fit = fit_ols(X, y)
+    with pytest.raises(ValueError, match="x0 has"):
+        predict_with_intervals(X, y, fit, x0=[1.0])
+
+
+def test_predict_with_intervals_rejects_degenerate_degrees_of_freedom():
+    X = np.array([[1.0, 2.0], [3.0, 4.0]])  # 2 samples, 2 features -> df=2-3=-1
+    y = np.array([1.0, 2.0])
+    fit = LinearFit(weights=np.array([1.0, 1.0]), bias=0.0)
+    with pytest.raises(ValueError, match="n_samples > n_features"):
+        predict_with_intervals(X, y, fit, x0=[1.0, 1.0])
 
 
 # --- guards ---

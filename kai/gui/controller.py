@@ -17,7 +17,7 @@ import numpy as np
 
 from kai.gui.helpers import format_elapsed
 from kai.gui.state import TrainingRequest, TrainingResult
-from kai.model import Model
+from kai.model import Model, TrainedModel
 from kai.visualization import metrics_rows
 
 
@@ -25,6 +25,7 @@ class TrainingController:
     def __init__(self, schedule_on_ui: Callable[[Callable[[], None]], None]):
         self._schedule_on_ui = schedule_on_ui
         self._running = False
+        self._cancel_event: threading.Event | None = None
 
     @property
     def is_running(self) -> bool:
@@ -41,39 +42,69 @@ class TrainingController:
         if self._running:
             raise RuntimeError("A training run is already in progress")
         self._running = True
+        self._cancel_event = threading.Event()
         threading.Thread(
             target=self._worker, args=(request, on_success, on_error), daemon=True
         ).start()
 
+    def stop(self) -> None:
+        """Request cancellation of the run in progress, if any. Takes effect
+        at the start of the next epoch (gradient descent only - OLS has no
+        iterations to interrupt)."""
+        if self._cancel_event is not None:
+            self._cancel_event.set()
+
     def _worker(self, request: TrainingRequest, on_success, on_error) -> None:
         started = time.monotonic()
-        hp = request.hyperparameters
         try:
-            model = Model(request.csv_path, request.label_column)
-            model.start_training(
-                list(request.features),
-                learning_rate=hp.learning_rate,
-                batch_size=hp.batch_size,
-                epochs=hp.epochs,
-                tolerance=hp.tolerance,
-                standardize_features=hp.standardize_features,
-                random_state=hp.random_state,
-            )
+            trained = _fit_by_method(request, self._cancel_event)
+            model = trained.model
             result = TrainingResult(
                 request=request,
-                loss_history=tuple(model.loss_history),
+                x_train=model.x_train,
                 y_true=model.y_train,
                 y_pred=model.predict(model.x_train),
                 weights=np.atleast_1d(np.asarray(model.weight, dtype=float)),
                 bias=float(model.bias),
                 elapsed_seconds=time.monotonic() - started,
+                loss_history=trained.loss_history,
             )
         except Exception as exc:
             self._running = False
-            self._schedule_on_ui(lambda: on_error(exc))
+            # Python deletes the `exc` name when the except block exits, so the
+            # lambda must close over a plain variable instead - otherwise the
+            # callback (which only runs later, on the UI thread) raises
+            # NameError instead of ever reaching on_error.
+            error = exc
+            self._schedule_on_ui(lambda: on_error(error))
             return
         self._running = False
         self._schedule_on_ui(lambda: on_success(result))
+
+
+def _fit_by_method(
+    request: TrainingRequest, cancel_event: threading.Event | None = None
+) -> TrainedModel:
+    """Dispatch to the factory that matches the requested estimation method."""
+    if request.method == "gd":
+        hp = request.hyperparameters
+        return Model.fit_gradient_descent(
+            request.csv_path, request.label_column, list(request.features),
+            learning_rate=hp.learning_rate,
+            batch_size=hp.batch_size,
+            epochs=hp.epochs,
+            tolerance=hp.tolerance,
+            standardize_features=hp.standardize_features,
+            random_state=hp.random_state,
+            sep=request.separator,
+            cancel_event=cancel_event,
+        )
+    if request.method == "ols":
+        return Model.fit_ols(
+            request.csv_path, request.label_column, list(request.features),
+            sep=request.separator,
+        )
+    raise ValueError(f"Unknown estimation method {request.method!r}.")
 
 
 def _format_equation(result: TrainingResult) -> str:
@@ -86,9 +117,12 @@ def _format_equation(result: TrainingResult) -> str:
 
 
 def build_results_report(result: TrainingResult) -> str:
-    """Render a training run as a plain-text report (no dataset rows)."""
+    """Render a training run as a plain-text report (no dataset rows).
+
+    The layout adapts to the estimation method: OLS has no hyperparameters
+    and no epochs/final-loss to report, so those sections are omitted.
+    """
     request = result.request
-    hp = request.hyperparameters
     lines = [
         "=" * 60,
         " kai - Training Report",
@@ -100,24 +134,41 @@ def build_results_report(result: TrainingResult) -> str:
         f"  label column    : {request.label_column}",
         f"  feature columns : {', '.join(request.features)}",
         "",
-        "Hyperparameters",
-        f"  learning rate   : {hp.learning_rate}",
-        f"  batch size      : {hp.batch_size}",
-        f"  max epochs      : {hp.epochs}",
-        f"  stop tolerance  : {hp.tolerance} (relative: ||grad|| <= tol * ||grad_initial||)",
-        f"  standardization : {'enabled (z-score)' if hp.standardize_features else 'disabled'}",
-        f"  random state    : {hp.random_state if hp.random_state is not None else 'unseeded (not reproducible)'}",
-        "",
-        "Training",
-        f"  epochs run      : {result.epochs_run}",
-        f"  elapsed time    : {format_elapsed(result.elapsed_seconds)} (mm:ss:cc)",
-        f"  final MSE       : {result.final_loss:.6f}",
-        "",
-        "Model",
-        f"  {_format_equation(result)}",
+        "Method",
+        f"  {'ordinary least squares (closed form)' if request.method == 'ols' else 'gradient descent'}",
     ]
-    if hp.standardize_features:
-        lines.append("  (weights are in standardized feature space; predict() re-applies the scaling)")
+    if request.method == "gd":
+        hp = request.hyperparameters
+        lines += [
+            "",
+            "Hyperparameters",
+            f"  learning rate   : {hp.learning_rate}",
+            f"  batch size      : {hp.batch_size}",
+            f"  max epochs      : {hp.epochs}",
+            f"  stop tolerance  : {hp.tolerance} (relative: ||grad|| <= tol * ||grad_initial||)",
+            f"  standardization : {'enabled (z-score)' if hp.standardize_features else 'disabled'}",
+            f"  random state    : {hp.random_state if hp.random_state is not None else 'unseeded (not reproducible)'}",
+            "",
+            "Training",
+            f"  epochs run      : {result.epochs_run}",
+            f"  elapsed time    : {format_elapsed(result.elapsed_seconds)} (mm:ss:cc)",
+            f"  final MSE       : {result.final_loss:.6f}",
+        ]
+        if hp.standardize_features:
+            model_note = "  (weights are in standardized feature space; predict() re-applies the scaling)"
+        else:
+            model_note = None
+    else:
+        lines += [
+            "",
+            "Timing",
+            f"  elapsed time    : {format_elapsed(result.elapsed_seconds)} (mm:ss:cc)",
+        ]
+        model_note = None
+
+    lines += ["", "Model", f"  {_format_equation(result)}"]
+    if model_note:
+        lines.append(model_note)
     lines += ["", "Metrics (in-sample)"]
     for name, value in metrics_rows(result.y_true, result.y_pred, len(request.features)):
         lines.append(f"  {name:<18}: {value:.6f}")

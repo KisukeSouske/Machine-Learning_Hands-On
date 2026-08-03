@@ -1,43 +1,85 @@
+"""A fitted linear model + factories that produce one via a chosen method.
+
+`Model` is now a pure prediction object: it holds the fitted parameters and
+the training-time feature scaling, and it knows how to reapply that scaling
+when predicting from raw inputs. It does NOT run any training itself.
+
+Two factories build a Model, one per estimation method:
+
+- `Model.fit_gradient_descent(...)` - iterative, has hyperparameters (learning
+  rate, batch size, epochs, tolerance, optional Z-scoring) and produces a
+  loss history you can plot.
+- `Model.fit_ols(...)`             - closed-form ordinary least squares, no
+  hyperparameters, exact solution, no loss history.
+
+Each factory returns a `TrainedModel`, a tiny dataclass pairing the fitted
+`Model` with any method-specific artifact (the loss history for GD, nothing
+for OLS). This is cleaner than an inheritance hierarchy: the two methods
+share exactly one thing - the prediction function - and diverge on everything
+else, so keeping "artifacts" separate from the predictor keeps the Model API
+uniform without pretending they are two flavours of the same class.
+"""
+from __future__ import annotations
+
+import threading
+from dataclasses import dataclass, field
+
 import numpy as np
 import pandas as pd
 
 from kai.preprocessing import standardize
-from kai.regression import fit_gradient_descent
+from kai.regression import fit_gradient_descent, fit_ols
+
+
+@dataclass(frozen=True)
+class TrainedModel:
+    """A Model plus whatever extra artifacts its training method produced.
+
+    `loss_history` is only populated by gradient descent (where iteration
+    produces one). OLS has no iterations, so it stays `None`.
+    """
+
+    model: Model
+    method: str
+    loss_history: tuple[float, ...] | None = None
 
 
 class Model:
-    """A CSV-backed linear model.
+    """A fitted linear regressor: parameters + how to reapply training scaling."""
 
-    This is the stateful adapter around the pure solvers in `kai.regression`:
-    it owns data loading, the feature scaling used during training, and the
-    fitted parameters, so `predict` can re-apply the same transform. The
-    fitting itself is delegated - call `kai.regression.fit_gradient_descent`
-    or `fit_ols` directly when you just have arrays and want no state.
-    """
-
-    def __init__(self, csv_file: str, label_column: str):
+    def __init__(
+        self,
+        csv_file: str,
+        label_column: str,
+        features: list[str],
+        x_train: np.ndarray,
+        y_train: np.ndarray,
+        weights: np.ndarray,
+        bias: float,
+        feature_mean: np.ndarray | None = None,
+        feature_std: np.ndarray | None = None,
+    ):
+        """Callers rarely build a Model directly; use the classmethods below."""
         self.csv_file = csv_file
         self.label_column = label_column
-        self._weight = 0
-        self._bias = 0
-        self._loss_history = []
-        self._x_train = np.array([])
-        self._y_train = np.array([])
-        self._features = []
-        self._feature_mean = None
-        self._feature_std = None
+        self._features = list(features)
+        self._x_train = np.asarray(x_train, dtype=float)
+        self._y_train = np.asarray(y_train, dtype=float)
+        self._weight = np.asarray(weights, dtype=float)
+        self._bias = float(bias)
+        self._feature_mean = None if feature_mean is None else np.asarray(feature_mean, dtype=float)
+        self._feature_std = None if feature_std is None else np.asarray(feature_std, dtype=float)
 
+    # ------------------------------------------------------------------ #
+    # Read-only accessors
+    # ------------------------------------------------------------------ #
     @property
-    def weight(self) -> float:
+    def weight(self) -> np.ndarray:
         return self._weight
 
     @property
     def bias(self) -> float:
         return self._bias
-
-    @property
-    def loss_history(self) -> list:
-        return list(self._loss_history)
 
     @property
     def x_train(self) -> np.ndarray:
@@ -47,14 +89,55 @@ class Model:
     def y_train(self) -> np.ndarray:
         return self._y_train.copy()
 
-    def get_data(self, label_column: str, features_columns: list[str]) -> tuple[pd.DataFrame, pd.Series]:
-        df = pd.read_csv(self.csv_file)
-        X = df[features_columns]
-        y = df[label_column]
-        return X, y
+    @property
+    def features(self) -> list[str]:
+        return list(self._features)
 
-    def start_training(
-        self,
+    @property
+    def feature_mean(self) -> np.ndarray | None:
+        return None if self._feature_mean is None else self._feature_mean.copy()
+
+    @property
+    def feature_std(self) -> np.ndarray | None:
+        return None if self._feature_std is None else self._feature_std.copy()
+
+    # ------------------------------------------------------------------ #
+    # Prediction (shared by both training methods)
+    # ------------------------------------------------------------------ #
+    def predict(self, x: np.ndarray) -> np.ndarray:
+        """Predict from RAW feature values, reapplying any training scaling."""
+        x = np.asarray(x, dtype=float)
+        if self._feature_mean is not None:
+            x = (x - self._feature_mean) / self._feature_std
+        return self._bias + x @ self._weight
+
+    # ------------------------------------------------------------------ #
+    # Data loading (shared)
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def load_columns(
+        csv_file: str,
+        label_column: str,
+        feature_columns: list[str],
+        sep: str | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Read the required columns from a CSV as plain numpy arrays.
+
+        `sep=None` asks pandas to sniff the delimiter (python engine); pass
+        the delimiter explicitly (e.g. ";") to skip the sniff.
+        """
+        engine = "python" if sep is None else None
+        df = pd.read_csv(csv_file, sep=sep, engine=engine)
+        return df[feature_columns].to_numpy(dtype=float), df[label_column].to_numpy(dtype=float)
+
+    # ------------------------------------------------------------------ #
+    # Factories, one per estimation method
+    # ------------------------------------------------------------------ #
+    @classmethod
+    def fit_gradient_descent(
+        cls,
+        csv_file: str,
+        label_column: str,
         features: list[str],
         learning_rate: float,
         batch_size: int = 100,
@@ -62,60 +145,61 @@ class Model:
         tolerance: float = 1e-4,
         standardize_features: bool = False,
         random_state: int | None = None,
-    ) -> None:
-        """Load the CSV columns and fit weights and bias by gradient descent.
+        sep: str | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> TrainedModel:
+        """Fit by mini-batch gradient descent.
 
-        Parameters:
-        features (list[str]): Feature column names to use as predictors.
-        learning_rate (float): Step size. Must satisfy lr < 2/lambda_max of the
-            MSE Hessian or training diverges; standardizing features raises that
-            ceiling dramatically (see `standardize_features`).
-        batch_size (int): Samples per gradient step. Values >= n_samples make
-            this plain full-batch gradient descent.
-        epochs (int): Maximum passes over the data; a safety ceiling, not a target.
-        tolerance (float): Relative convergence threshold. Training stops when
-            ||grad|| <= tolerance * ||grad_initial||. Being relative to the
-            starting gradient makes it invariant to the scale of y and of the
-            features, unlike an absolute threshold on the loss delta.
-        standardize_features (bool): Z-score the predictors before training.
-            Recommended whenever features live on different scales: it drives
-            the Hessian condition number toward 1, which is what lets a single
-            learning rate work for every column (ISLR, p.179).
-        random_state (int | None): Seed for the per-epoch batch shuffle. Pass an
-            int for reproducible runs; None (default) reshuffles differently
-            every call.
-
-        Raises:
-        ValueError: If the loss becomes non-finite, i.e. training diverged.
+        Parameters mirror `kai.regression.fit_gradient_descent`. The returned
+        TrainedModel carries the per-epoch loss history for plotting. `sep`
+        is forwarded to pandas (None = sniff); `cancel_event` is forwarded to
+        allow stopping the run early (raises `TrainingCancelled`).
         """
-        X, y = self.get_data(self.label_column, features)
-        x_raw, y_full = X.to_numpy(dtype=float), y.to_numpy(dtype=float)
-        # _x_train always keeps the RAW values; predict() re-applies the same
-        # transform, so callers never have to know whether training was scaled
-        self._x_train, self._y_train, self._features = x_raw, y_full, features
+        x_raw, y = cls.load_columns(csv_file, label_column, features, sep=sep)
 
         if standardize_features:
-            x_fit, self._feature_mean, self._feature_std = standardize(x_raw)
+            x_fit, feature_mean, feature_std = standardize(x_raw)
         else:
-            x_fit = x_raw
-            self._feature_mean = self._feature_std = None
+            x_fit, feature_mean, feature_std = x_raw, None, None
 
         fit = fit_gradient_descent(
-            x_fit,
-            y_full,
+            x_fit, y,
             learning_rate=learning_rate,
             batch_size=batch_size,
             epochs=epochs,
             tolerance=tolerance,
             random_state=random_state,
+            cancel_event=cancel_event,
         )
-        self._weight = fit.weights
-        self._bias = fit.bias
-        self._loss_history = list(fit.loss_history)
+        model = cls(
+            csv_file=csv_file, label_column=label_column, features=features,
+            x_train=x_raw, y_train=y,
+            weights=fit.weights, bias=fit.bias,
+            feature_mean=feature_mean, feature_std=feature_std,
+        )
+        return TrainedModel(model=model, method="gd", loss_history=fit.loss_history)
 
-    def predict(self, x: np.ndarray) -> np.ndarray:
-        """Predict from RAW feature values, re-applying any training scaling."""
-        x = np.asarray(x, dtype=float)
-        if self._feature_mean is not None:
-            x = (x - self._feature_mean) / self._feature_std
-        return self._bias + x @ self._weight
+    @classmethod
+    def fit_ols(
+        cls,
+        csv_file: str,
+        label_column: str,
+        features: list[str],
+        sep: str | None = None,
+    ) -> TrainedModel:
+        """Fit exactly, by ordinary least squares via the normal equations.
+
+        No hyperparameters, no scaling: OLS is invariant to affine changes of
+        the predictors, and standardization would only complicate the returned
+        coefficients without changing the fit itself. The returned TrainedModel
+        has no loss_history (there was no iteration). `sep` is forwarded to
+        pandas (None = sniff).
+        """
+        x_raw, y = cls.load_columns(csv_file, label_column, features, sep=sep)
+        fit = fit_ols(x_raw, y)
+        model = cls(
+            csv_file=csv_file, label_column=label_column, features=features,
+            x_train=x_raw, y_train=y,
+            weights=fit.weights, bias=fit.bias,
+        )
+        return TrainedModel(model=model, method="ols", loss_history=None)

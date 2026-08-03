@@ -9,14 +9,43 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+import numpy as np
 import pandas as pd
 
 from kai.gui.controller import TrainingController, save_results_report
-from kai.gui.helpers import format_elapsed, list_csv_files, read_csv_preview
+from kai.gui.helpers import (
+    count_csv_data_rows,
+    detect_csv_separator,
+    format_elapsed,
+    format_prediction,
+    humanize_column,
+    list_csv_files,
+    read_csv_preview,
+)
 from kai.gui.state import Hyperparameters, TrainingRequest, TrainingResult
-from kai.gui.widgets import ChartTabBar, MultiSelectDropdown, PanelHeader, StatusBar, ThemedButton
+from kai.gui.widgets import (
+    ChartTabBar,
+    HelpHint,
+    MultiSelectDropdown,
+    PanelHeader,
+    StatusBar,
+    ThemedButton,
+)
+from kai.metrics import f_statistic
+from kai.model import Model
+from kai.regression import (
+    InferenceSummary,
+    LinearFit,
+    PredictionInterval,
+    TrainingCancelled,
+    fit_ols,
+    predict_with_intervals,
+    summarize_inference,
+    variance_inflation_factors,
+)
 from kai.themes import Theme, get_theme
 from kai.visualization import (
+    CHART_CALIBRATION,
     CHART_LABELS,
     CHART_LOSS,
     CHART_PREDICTED_VS_ACTUAL,
@@ -39,8 +68,118 @@ STANDARDIZED_LEARNING_RATE = 0.05
 DATA_PANEL_WIDTH = 430
 CONFIG_PANEL_WIDTH = 231  # 165 * 1.4
 PREVIEW_HEIGHT = 150
-BOTTOM_ROW_HEIGHT = 210
+TOP_ROW_HEIGHT = 250
 STATUS_PANEL_WIDTH = 240
+TESTING_PANEL_WIDTH = 260
+
+# Where the calibration chart pins the predictors it is NOT sweeping. The mean
+# is the neutral default, but the interesting failure modes of a linear model
+# only show up away from it - a positive-only response can be predicted
+# negative once the other predictors sit low enough, which is invisible at the
+# mean. "Testing inputs" reads the values typed in the Model Testing panel, so
+# any combination (including extrapolation beyond the data) can be inspected.
+CALIBRATION_AT_MEAN = "Mean"
+CALIBRATION_AT_MIN = "Min"
+CALIBRATION_AT_MAX = "Max"
+CALIBRATION_AT_INPUTS = "Testing inputs"
+CALIBRATION_BASELINES = (
+    CALIBRATION_AT_MEAN, CALIBRATION_AT_MIN, CALIBRATION_AT_MAX, CALIBRATION_AT_INPUTS,
+)
+
+# Explanatory blurbs for the "?" hints. Kept together so wording stays consistent
+# and translations (should we ever add them) live in one place.
+HELP_LEARNING_RATE = (
+    "Step size for gradient descent. Too high => training diverges (loss "
+    "explodes). Too low => training crawls. If you standardize the features, "
+    "you can safely use a much larger value."
+)
+HELP_EPOCHS = (
+    "Maximum passes over the dataset. Training stops earlier once the "
+    "convergence criterion is met; this is a safety ceiling, not a target."
+)
+HELP_BATCH_SIZE = (
+    "Samples used in each gradient step. Values >= number of samples reduce "
+    "this to plain full-batch gradient descent."
+)
+HELP_TOLERANCE = (
+    "Relative convergence threshold: training stops when the gradient norm "
+    "falls to this fraction of its initial value. Being relative, it is "
+    "invariant to the units of y and of the features."
+)
+HELP_STANDARDIZE = (
+    "Z-score each predictor before training (subtract mean, divide by std). "
+    "Strongly recommended when features live on different scales; it makes "
+    "gradient descent converge in orders of magnitude fewer epochs."
+)
+
+HELP_LOSS_L1 = "Sum of absolute residuals: total_L1 = sum(|y_true - y_pred|)."
+HELP_SQUARED_LOSS = "Sum of squared residuals (RSS): sum((y_true - y_pred)^2)."
+HELP_MSE = "Mean squared error: RSS / n. Same units as y^2."
+HELP_RMSE = (
+    "Root mean squared error: sqrt(MSE). Same units as y, so directly "
+    "comparable to typical values of the target."
+)
+HELP_R2 = (
+    "Proportion of variance in y explained by the model: 1 - RSS/TSS. "
+    "1.0 = perfect fit, 0.0 = no better than predicting the mean, "
+    "negative = worse than the mean."
+)
+HELP_R2_ADJ = (
+    "R² penalized for the number of predictors, so adding a useless feature "
+    "no longer inflates the score (ISLR eq. 6.4)."
+)
+HELP_COEF = (
+    "Estimated regression coefficient (in the same feature space that was "
+    "used for training - if standardization is on, the coefficient is in "
+    "standardized space)."
+)
+HELP_SE = (
+    "Standard error of the coefficient: how much this estimate would jitter "
+    "across different samples from the same population (ISLR eq. 3.8, matrix "
+    "form for multiple regression)."
+)
+HELP_T = (
+    "t-statistic = coefficient / SE. Measures how many standard errors the "
+    "estimate is away from zero (ISLR eq. 3.14)."
+)
+HELP_P = (
+    "Two-tailed p-value for H0: coefficient = 0. Small p (< 0.05) is evidence "
+    "the predictor matters. Look at the F-statistic first to decide whether "
+    "the model as a whole is useful, then read the individual p-values."
+)
+HELP_F = (
+    "F-statistic tests whether at least one predictor is useful (H0: all "
+    "coefficients are zero). Values much greater than 1 reject H0 (ISLR "
+    "eq. 3.23)."
+)
+HELP_VIF = (
+    "Variance Inflation Factor: how much the variance of a coefficient is "
+    "inflated by collinearity with the other predictors. VIF = 1 means no "
+    "collinearity; > 5 or 10 is a common warning threshold (ISLR p.102)."
+)
+HELP_INTERVALS = (
+    "95% confidence interval: uncertainty about the MEAN response at this "
+    "input. 95% prediction interval: uncertainty about a single NEW "
+    "observation at this input - wider, since it also includes the "
+    "individual error term (ISLR eq. 3.9-3.11). Both require OLS."
+)
+HELP_METHOD = (
+    "How the coefficients are estimated. Gradient descent is iterative and "
+    "produces a loss curve you can watch; OLS solves the normal equations "
+    "in closed form (no iterations, no hyperparameters), giving the exact "
+    "least-squares fit and enabling standard errors / t-tests / F-statistic "
+    "on the coefficients."
+)
+
+# Only OLS produces statistically valid standard errors / t-tests / F-statistic:
+# those formulas assume the exact least-squares minimum, which iterative
+# gradient descent only approaches, never touches. So the Inference tab is
+# disabled when GD is the active method.
+INFERENCE_GD_MESSAGE = (
+    "Inference requires the closed-form solution. Switch the estimation "
+    "method to OLS to see coefficient standard errors, t-statistics, "
+    "p-values and the F-statistic."
+)
 
 
 class TrainingApp(tk.Tk):
@@ -60,12 +199,16 @@ class TrainingApp(tk.Tk):
 
         self.csv_dir = Path(csv_dir) if csv_dir is not None else Path(__file__).resolve().parent.parent.parent
         self.current_csv_path: Path | None = None
+        self._current_separator: str = ","
         self._all_columns: list[str] = []
         self._preview_headers: dict[str, tk.Label] = {}
         self._preview_cells: dict[str, list[tk.Label]] = {}
         self._training_start_time = 0.0
         self._syncing_slider = False
         self._last_result: TrainingResult | None = None
+        # A fresh Model built alongside every completed run, so the Testing
+        # panel can call predict(x) and have the training scaling reapplied.
+        self._last_model: Model | None = None
 
         self.controller = TrainingController(schedule_on_ui=lambda cb: self.after(0, cb))
 
@@ -92,6 +235,14 @@ class TrainingApp(tk.Tk):
                         font=fonts.small)
         style.configure("Stopwatch.TLabel", background=palette.panel_bg,
                         foreground=palette.text_fg, font=fonts.stopwatch)
+        # The readout is split in two: the target name in the ordinary UI font
+        # (it is prose, not a numeric display) and the value below it. Sized so
+        # that neither can outgrow TESTING_PANEL_WIDTH and get clipped.
+        style.configure("PredictionName.TLabel", background=palette.panel_bg,
+                        foreground=palette.text_fg, font=fonts.small)
+        style.configure("Prediction.TLabel", background=palette.panel_bg,
+                        foreground=palette.text_fg,
+                        font=(fonts.stopwatch[0], 15, "bold"))
         style.configure("TCheckbutton", background=palette.panel_bg, foreground=palette.text_fg,
                         font=fonts.body)
         style.configure("TNotebook", background=palette.panel_bg)
@@ -134,25 +285,34 @@ class TrainingApp(tk.Tk):
         config_panel = self._panel(config_column, "Hyperparameter Configuration")
         config_panel.pack(fill="both", expand=True)
 
-        bottom_row = ttk.Frame(center, height=BOTTOM_ROW_HEIGHT)
-        bottom_row.pack(side="bottom", fill="x", pady=(8, 0))
-        bottom_row.pack_propagate(False)
+        # Top row (status + metrics + testing) sits ABOVE Model Training.
+        # Model Training then takes all the remaining vertical space.
+        top_row = ttk.Frame(center, height=TOP_ROW_HEIGHT)
+        top_row.pack(side="top", fill="x")
+        top_row.pack_propagate(False)
 
-        charts_panel = self._panel(center, "Model Training")
-        charts_panel.pack(fill="both", expand=True)
-
-        status_panel = self._panel(bottom_row, "Training Status")
+        status_panel = self._panel(top_row, "Training Status")
         status_panel.pack(side="left", fill="both")
         status_panel.configure(width=STATUS_PANEL_WIDTH)
         status_panel.pack_propagate(False)
-        metrics_panel = self._panel(bottom_row, "Training Metrics")
-        metrics_panel.pack(side="right", fill="both", expand=True, padx=(8, 0))
+
+        testing_panel = self._panel(top_row, "Model Testing")
+        testing_panel.pack(side="left", fill="both", padx=(8, 0))
+        testing_panel.configure(width=TESTING_PANEL_WIDTH)
+        testing_panel.pack_propagate(False)
+
+        metrics_panel = self._panel(top_row, "Training Metrics")
+        metrics_panel.pack(side="left", fill="both", expand=True, padx=(8, 0))
+
+        charts_panel = self._panel(center, "Model Training")
+        charts_panel.pack(side="top", fill="both", expand=True, pady=(8, 0))
 
         self._build_data_panel(data_panel.body)
         self._build_config_panel(config_panel.body)
         self._build_charts_panel(charts_panel.body)
         self._build_status_panel(status_panel.body)
         self._build_metrics_panel(metrics_panel.body)
+        self._build_testing_panel(testing_panel.body)
 
     def _panel(self, parent, title: str) -> tk.Frame:
         """A bordered, titled panel; content goes into `panel.body`."""
@@ -165,18 +325,31 @@ class TrainingApp(tk.Tk):
         panel.body.pack(fill="both", expand=True, padx=8, pady=8)
         return panel
 
+    def _label_with_hint(self, parent, text: str, tooltip: str, style: str = "Small.TLabel"):
+        """A form label followed by a tiny "?" hint. Returned as a row so the
+        caller can `.pack()` it in a form."""
+        row = ttk.Frame(parent)
+        ttk.Label(row, text=text, style=style).pack(side="left")
+        HelpHint(row, self.theme, tooltip).pack(side="left", padx=(4, 0), pady=(2, 0))
+        return row
+
     # ------------------------------------------------------------------ #
     # Data selection & preview
     # ------------------------------------------------------------------ #
     def _build_data_panel(self, parent) -> None:
         palette = self.theme.palette
         ttk.Label(parent, text="Select CSV File", style="Field.TLabel").pack(anchor="w")
+        csv_row = ttk.Frame(parent)
+        csv_row.pack(fill="x", pady=(2, 0))
         self.csv_var = tk.StringVar()
-        self.csv_combo = ttk.Combobox(parent, textvariable=self.csv_var, state="readonly")
-        self.csv_combo.pack(fill="x", pady=(2, 10))
+        self.csv_combo = ttk.Combobox(csv_row, textvariable=self.csv_var, state="readonly")
+        self.csv_combo.pack(side="left", fill="x", expand=True)
         self.csv_combo.bind("<Button-1>", lambda _e: self._refresh_csv_list())
         self.csv_combo.bind("<<ComboboxSelected>>", self._on_csv_selected)
         self._refresh_csv_list()
+        self.browse_button = ThemedButton(csv_row, "Browse...", self.theme, command=self._on_browse_csv)
+        self.browse_button.configure(width=80)
+        self.browse_button.pack(side="left", padx=(6, 0))
 
         # fixed (not expanding) height so the column pickers sit right below it.
         # its children are grid-managed, so grid_propagate is what pins the size
@@ -207,6 +380,11 @@ class TrainingApp(tk.Tk):
             lambda e: self.preview_canvas.yview_scroll(int(-e.delta / 120), "units"),
         )
 
+        self.row_count_label = tk.Label(
+            parent, text="", font=self.theme.fonts.small, fg="#555555", bg=palette.panel_bg,
+        )
+        self.row_count_label.pack(anchor="w", pady=(2, 0))
+
         ttk.Label(parent, text="Select Label Column", style="Field.TLabel").pack(anchor="w", pady=(10, 0))
         self.label_var = tk.StringVar()
         self.label_combo = ttk.Combobox(parent, textvariable=self.label_var, state="disabled")
@@ -233,16 +411,34 @@ class TrainingApp(tk.Tk):
         filename = self.csv_var.get()
         if not filename:
             return
-        path = self.csv_dir / filename
+        self._load_csv(self.csv_dir / filename)
+
+    def _on_browse_csv(self) -> None:
+        chosen = filedialog.askopenfilename(
+            title="Select a CSV file", filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not chosen:
+            return
+        path = Path(chosen)
+        # Keep the combobox in sync when the browsed file also lives in csv_dir;
+        # otherwise leave it blank so the field doesn't lie about where it's from.
+        self.csv_var.set(path.name if path.parent == self.csv_dir else "")
+        self._load_csv(path)
+
+    def _load_csv(self, path: Path) -> None:
         try:
-            preview_df = read_csv_preview(path)
+            separator = detect_csv_separator(path)
+            preview_df = read_csv_preview(path, sep=separator)
+            row_count = count_csv_data_rows(path)
         except Exception as exc:
             messagebox.showerror("Failed to read CSV", str(exc))
             return
 
         self.current_csv_path = path
+        self._current_separator = separator
         self._all_columns = list(preview_df.columns)
         self._build_preview(preview_df)
+        self.row_count_label.configure(text=f"{row_count} example(s) loaded")
 
         self.label_combo["values"] = self._all_columns
         self.label_var.set("")
@@ -252,8 +448,8 @@ class TrainingApp(tk.Tk):
         self._refresh_feature_options()
         self._render_chips()
         self._recolor_preview()
-        self.log(f"Loaded {filename} ({len(self._all_columns)} columns)")
-        self.status_bar.set_text(f"{filename} loaded - select the label and feature columns")
+        self.log(f"Loaded {path.name} ({len(self._all_columns)} columns, separator {separator!r})")
+        self.status_bar.set_text(f"{path.name} loaded - select the label and feature columns")
 
     def _build_preview(self, df: pd.DataFrame) -> None:
         palette, fonts = self.theme.palette, self.theme.fonts
@@ -345,17 +541,46 @@ class TrainingApp(tk.Tk):
                 cell.configure(bg=cell_color)
 
     # ------------------------------------------------------------------ #
-    # Charts / metrics / status
+    # Charts / metrics / status / testing
     # ------------------------------------------------------------------ #
     def _build_charts_panel(self, parent) -> None:
+        tab_row = ttk.Frame(parent)
+        tab_row.pack(fill="x", pady=(0, 6))
+
         self.chart_tabs = ChartTabBar(
-            parent,
+            tab_row,
             self.theme,
-            [(key, CHART_LABELS[key]) for key in (CHART_LOSS, CHART_RESIDUALS, CHART_PREDICTED_VS_ACTUAL)],
+            [(key, CHART_LABELS[key]) for key in
+             (CHART_LOSS, CHART_RESIDUALS, CHART_PREDICTED_VS_ACTUAL, CHART_CALIBRATION)],
             active_keys=[CHART_LOSS],
             on_change=self._render_charts,
         )
-        self.chart_tabs.pack(fill="x", pady=(0, 6))
+        self.chart_tabs.pack(side="left")
+
+        # Controls for the calibration chart. Packed right-to-left, so the
+        # visual order ends up "Calibration vs: [x] | others at: [baseline]".
+        # Both are populated after a run, since the features are only known then.
+        self.calibration_baseline_var = tk.StringVar(value=CALIBRATION_AT_MEAN)
+        self.calibration_baseline_combo = ttk.Combobox(
+            tab_row, textvariable=self.calibration_baseline_var, state="disabled",
+            width=14, values=CALIBRATION_BASELINES,
+        )
+        self.calibration_baseline_combo.pack(side="right")
+        self.calibration_baseline_combo.bind("<<ComboboxSelected>>",
+                                             lambda _event: self._render_charts())
+        ttk.Label(tab_row, text="others at:", style="Small.TLabel").pack(
+            side="right", padx=(8, 4))
+
+        self.calibration_var = tk.StringVar(value="")
+        self.calibration_combo = ttk.Combobox(
+            tab_row, textvariable=self.calibration_var, state="disabled",
+            width=18, values=(),
+        )
+        self.calibration_combo.pack(side="right")
+        self.calibration_combo.bind("<<ComboboxSelected>>",
+                                    lambda _event: self._render_charts())
+        ttk.Label(tab_row, text="Calibration vs:", style="Small.TLabel").pack(
+            side="right", padx=(8, 4))
 
         self.figure = Figure(figsize=(9, 4))
         self.figure.patch.set_facecolor(self.theme.charts.figure_bg)
@@ -387,14 +612,73 @@ class TrainingApp(tk.Tk):
     def _selected_charts(self) -> list[str]:
         return self.chart_tabs.get_active()
 
+    def _rebuild_calibration_choices(self, feature_names: tuple[str, ...]) -> None:
+        """Point the calibration dropdown at the features of the last run,
+        keeping the current pick when it survived the new selection."""
+        features = list(feature_names)
+        self.calibration_combo.configure(values=features)
+        if not features:
+            self.calibration_var.set("")
+            self.calibration_combo.configure(state="disabled")
+            self.calibration_baseline_combo.configure(state="disabled")
+            return
+        if self.calibration_var.get() not in features:
+            self.calibration_var.set(features[0])
+        self.calibration_combo.configure(state="readonly")
+        self.calibration_baseline_combo.configure(state="readonly")
+
+    def _calibration_baseline(self, result: TrainingResult) -> tuple[np.ndarray, str]:
+        """The point at which the calibration chart pins the other predictors,
+        plus a short note naming it for the legend.
+
+        Falls back to the mean whenever the requested baseline cannot be built
+        - notably when "Testing inputs" is selected but a field is blank or
+        not a number, which would otherwise raise mid-render.
+        """
+        choice = self.calibration_baseline_var.get()
+        x_train = np.asarray(result.x_train, dtype=float)
+        if choice == CALIBRATION_AT_MIN:
+            return x_train.min(axis=0), "others at min"
+        if choice == CALIBRATION_AT_MAX:
+            return x_train.max(axis=0), "others at max"
+        if choice == CALIBRATION_AT_INPUTS:
+            try:
+                values = [float(self._testing_inputs[name].get())
+                          for name in result.request.features]
+            except (KeyError, ValueError):
+                return x_train.mean(axis=0), "others at mean (inputs invalid)"
+            return np.array(values, dtype=float), "others at testing inputs"
+        return x_train.mean(axis=0), "others at mean"
+
     def _render_charts(self) -> None:
         if self._last_result is None:
             return
         result = self._last_result
+        # OLS has no iterations, so silently drop the Loss chart from the
+        # selection if it happens to be active. list() copy so we do not mutate
+        # the tab bar's own state.
+        selected = list(self._selected_charts())
+        if result.loss_history is None and CHART_LOSS in selected:
+            selected.remove(CHART_LOSS)
+        loss_history = list(result.loss_history) if result.loss_history is not None else []
+        features = list(result.request.features)
+        # the dropdown holds a feature name; fall back to the first predictor
+        # if it is empty or stale (e.g. right after a run with new features)
+        try:
+            calibration_index = features.index(self.calibration_var.get())
+        except ValueError:
+            calibration_index = 0
+        baseline, baseline_note = self._calibration_baseline(result)
         self.figure.clear()
         build_charts_figure(
-            self.figure, list(result.loss_history), result.y_true, result.y_pred,
-            charts=self._selected_charts(), style=self.theme.charts,
+            self.figure, loss_history, result.y_true, result.y_pred,
+            charts=selected, style=self.theme.charts,
+            x_train=result.x_train, feature_names=features,
+            predict=self._last_model.predict if self._last_model else None,
+            label_name=result.request.label_column,
+            calibration_index=calibration_index,
+            calibration_baseline=baseline,
+            calibration_baseline_note=baseline_note,
         )
         self.canvas.draw()
         # reset the zoom/pan history so the toolbar's "home" matches the new axes
@@ -411,17 +695,69 @@ class TrainingApp(tk.Tk):
             style="Small.TLabel", wraplength=520, justify="left",
         ).pack(side="bottom", fill="x", pady=(6, 0))
 
-        tree_row = ttk.Frame(parent)
-        tree_row.pack(side="top", fill="both", expand=True)
-        self.metrics_tree = ttk.Treeview(tree_row, columns=("metric", "value"), show="headings", height=6)
+        notebook = ttk.Notebook(parent)
+        notebook.pack(side="top", fill="both", expand=True)
+
+        # --- Fit tab: the old two-column table (metric, value) ---
+        fit_tab = ttk.Frame(notebook)
+        notebook.add(fit_tab, text="Fit")
+        self.metrics_tree = ttk.Treeview(fit_tab, columns=("metric", "value"),
+                                          show="headings", height=6)
         self.metrics_tree.heading("metric", text="Metric")
         self.metrics_tree.heading("value", text="Value")
         self.metrics_tree.column("metric", anchor="w", width=180)
         self.metrics_tree.column("value", anchor="e", width=120)
-        scrollbar = ttk.Scrollbar(tree_row, orient="vertical", command=self.metrics_tree.yview)
-        self.metrics_tree.configure(yscrollcommand=scrollbar.set)
+        fit_scrollbar = ttk.Scrollbar(fit_tab, orient="vertical", command=self.metrics_tree.yview)
+        self.metrics_tree.configure(yscrollcommand=fit_scrollbar.set)
         self.metrics_tree.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        fit_scrollbar.pack(side="right", fill="y")
+
+        # --- Inference tab: coefficient / SE / t / p, one row per parameter ---
+        inference_tab = ttk.Frame(notebook)
+        notebook.add(inference_tab, text="Inference")
+
+        self.f_stat_var = tk.StringVar(value="F-statistic: run a model to see the value.")
+        f_row = ttk.Frame(inference_tab)
+        f_row.pack(fill="x", pady=(0, 4))
+        ttk.Label(f_row, textvariable=self.f_stat_var, style="Small.TLabel").pack(side="left")
+        HelpHint(f_row, self.theme, HELP_F).pack(side="left", padx=(4, 0))
+
+        cols = ("name", "coef", "se", "t", "p")
+        self.inference_tree = ttk.Treeview(inference_tab, columns=cols, show="headings", height=6)
+        headings = [("name", "Parameter", "w", 110),
+                    ("coef", "Coefficient", "e", 110),
+                    ("se", "Std. error", "e", 100),
+                    ("t", "t", "e", 70),
+                    ("p", "p-value", "e", 100)]
+        for key, label, anchor, width in headings:
+            self.inference_tree.heading(key, text=label)
+            self.inference_tree.column(key, anchor=anchor, width=width)
+        inf_scrollbar = ttk.Scrollbar(inference_tab, orient="vertical",
+                                       command=self.inference_tree.yview)
+        self.inference_tree.configure(yscrollcommand=inf_scrollbar.set)
+        self.inference_tree.pack(side="left", fill="both", expand=True)
+        inf_scrollbar.pack(side="right", fill="y")
+
+        # --- Collinearity tab: VIF per feature ---
+        collinearity_tab = ttk.Frame(notebook)
+        notebook.add(collinearity_tab, text="Collinearity")
+        vif_row = ttk.Frame(collinearity_tab)
+        vif_row.pack(fill="x", pady=(0, 4))
+        ttk.Label(vif_row, text="Variance Inflation Factors",
+                  style="Small.TLabel").pack(side="left")
+        HelpHint(vif_row, self.theme, HELP_VIF).pack(side="left", padx=(4, 0))
+
+        self.vif_tree = ttk.Treeview(collinearity_tab, columns=("feature", "vif"),
+                                      show="headings", height=6)
+        self.vif_tree.heading("feature", text="Feature")
+        self.vif_tree.heading("vif", text="VIF")
+        self.vif_tree.column("feature", anchor="w", width=180)
+        self.vif_tree.column("vif", anchor="e", width=120)
+        vif_scrollbar = ttk.Scrollbar(collinearity_tab, orient="vertical",
+                                       command=self.vif_tree.yview)
+        self.vif_tree.configure(yscrollcommand=vif_scrollbar.set)
+        self.vif_tree.pack(side="left", fill="both", expand=True)
+        vif_scrollbar.pack(side="right", fill="y")
 
     def _build_status_panel(self, parent) -> None:
         self.stopwatch_var = tk.StringVar(value=format_elapsed(0))
@@ -432,10 +768,125 @@ class TrainingApp(tk.Tk):
         self.start_button = ThemedButton(parent, "START TRAINING", self.theme,
                                           command=self._start_training, height=32)
         self.start_button.pack(fill="x", pady=(8, 4))
+        self.stop_button = ThemedButton(parent, "STOP", self.theme,
+                                         command=self._on_stop_training, height=28)
+        self.stop_button.configure(state="disabled")
+        self.stop_button.pack(fill="x", pady=(0, 4))
         self.save_button = ThemedButton(parent, "SAVE RESULTS", self.theme,
                                          command=self._save_results, height=28)
         self.save_button.configure(state="disabled")
         self.save_button.pack(fill="x")
+
+    def _build_testing_panel(self, parent) -> None:
+        """Live prediction for a single input row, populated after a training run."""
+        # Packed first, anchored to the bottom: this claims its slot in the
+        # panel's fixed height BEFORE anything else, so it can never be
+        # crowded out or clipped by the (variable-length) content above it.
+        self.predict_button = ThemedButton(parent, "PREDICT", self.theme,
+                                            command=self._on_predict, height=28)
+        self.predict_button.configure(state="disabled")
+        self.predict_button.pack(fill="x", side="bottom")
+
+        # The whole readout is bottom-anchored and packed BEFORE the input
+        # form, for the same reason as the button: pack hands out space in
+        # packing order, so anything declared after the form (which expands)
+        # gets squeezed to nothing inside this panel's fixed height. That is
+        # what used to swallow the predicted value.
+        interval_row = ttk.Frame(parent)
+        interval_row.pack(side="bottom", fill="x", pady=(0, 2))
+        HelpHint(interval_row, self.theme, HELP_INTERVALS).pack(side="left", anchor="n", padx=(0, 4))
+        self.interval_var = tk.StringVar(value="")
+        ttk.Label(interval_row, textvariable=self.interval_var, style="Small.TLabel",
+                  justify="left", wraplength=TESTING_PANEL_WIDTH - 40).pack(side="left", fill="x", expand=True)
+
+        # Name and value on separate lines: together on one line they overflow
+        # the panel width for any realistic column name, and the number (drawn
+        # last) is the part that falls off the edge.
+        self.prediction_var = tk.StringVar(value="—")
+        ttk.Label(parent, textvariable=self.prediction_var, style="Prediction.TLabel",
+                  anchor="center").pack(side="bottom", fill="x", pady=(0, 2))
+        self.prediction_name_var = tk.StringVar(value="")
+        ttk.Label(parent, textvariable=self.prediction_name_var, style="PredictionName.TLabel",
+                  anchor="center", wraplength=TESTING_PANEL_WIDTH - 24,
+                  justify="center").pack(side="bottom", fill="x", pady=(4, 0))
+
+        ttk.Label(parent, text="Predict a single input in the ORIGINAL feature space.",
+                  style="Small.TLabel", wraplength=TESTING_PANEL_WIDTH - 24,
+                  justify="left").pack(anchor="w", pady=(0, 4))
+
+        # Container refreshed after each training run - the input rows change
+        # because the feature list changes.
+        self._testing_form = ttk.Frame(parent)
+        self._testing_form.pack(fill="both", expand=True)
+        self._testing_inputs: dict[str, tk.StringVar] = {}
+        self._testing_empty_hint = ttk.Label(
+            self._testing_form, text="Train a model first.",
+            style="Small.TLabel", anchor="center",
+        )
+        self._testing_empty_hint.pack(pady=8)
+
+    def _rebuild_testing_form(self, feature_names: tuple[str, ...]) -> None:
+        """Rebuild the input rows to match the features of the last training run."""
+        for child in self._testing_form.winfo_children():
+            child.destroy()
+        self._testing_inputs = {}
+        self.interval_var.set("")
+        # the old readout belongs to the previous model - clear it so a stale
+        # number is never shown next to the new run's inputs
+        self.prediction_name_var.set("")
+        self.prediction_var.set("—")
+        for feature in feature_names:
+            row = ttk.Frame(self._testing_form)
+            row.pack(fill="x", pady=1)
+            ttk.Label(row, text=feature, style="Small.TLabel", width=14,
+                      anchor="w").pack(side="left")
+            var = tk.StringVar(value="0")
+            ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
+            self._testing_inputs[feature] = var
+        self.predict_button.configure(state="normal")
+
+    def _on_predict(self) -> None:
+        if self._last_model is None or not self._testing_inputs:
+            return
+        try:
+            values = [float(var.get()) for var in self._testing_inputs.values()]
+        except ValueError:
+            messagebox.showerror("Invalid input",
+                                 "Every field must be a number to compute a prediction.")
+            return
+        row = np.array([values])
+        prediction = float(self._last_model.predict(row).ravel()[0])
+        label = self._last_result.request.label_column if self._last_result else "y"
+        self.prediction_name_var.set(f"Predicted {humanize_column(label)}")
+        self.prediction_var.set(format_prediction(prediction))
+        self._update_prediction_intervals(np.array(values, dtype=float))
+        input_summary = ", ".join(f"{name}={var.get()}" for name, var in self._testing_inputs.items())
+        self.log(f"Prediction: {input_summary} -> {label}={prediction:.6f}")
+        # the calibration chart is pinned to these very inputs in that mode, so
+        # it would otherwise keep showing the previous row's line
+        if self.calibration_baseline_var.get() == CALIBRATION_AT_INPUTS:
+            self._render_charts()
+
+    def _update_prediction_intervals(self, x0: np.ndarray) -> None:
+        """Show the 95% confidence and prediction intervals at x0, or explain
+        why they are unavailable (same OLS-only restriction as the Inference
+        tab: the formulas assume the exact least-squares solution)."""
+        result = self._last_result
+        if result is None or result.request.method != "ols":
+            self.interval_var.set("Requires the OLS method.")
+            return
+        fit = LinearFit(weights=np.asarray(result.weights, dtype=float), bias=float(result.bias))
+        try:
+            interval: PredictionInterval = predict_with_intervals(
+                result.x_train, result.y_true, fit, x0,
+            )
+        except ValueError as exc:
+            self.interval_var.set(f"Unavailable: {exc}")
+            return
+        self.interval_var.set(
+            f"CI (mean): [{interval.confidence_lower:.4f}, {interval.confidence_upper:.4f}]\n"
+            f"PI (new obs): [{interval.prediction_lower:.4f}, {interval.prediction_upper:.4f}]"
+        )
 
     # ------------------------------------------------------------------ #
     # Hyperparameters + logs
@@ -453,22 +904,52 @@ class TrainingApp(tk.Tk):
         body = ttk.Frame(config_tab)
         body.pack(fill="both", expand=True, padx=6, pady=6)
 
+        # --- Method selector (top of the panel) ---
+        self._label_with_hint(body, "Estimation method", HELP_METHOD).pack(anchor="w")
+        self.method_var = tk.StringVar(value="gd")
+        method_row = ttk.Frame(body)
+        method_row.pack(anchor="w", fill="x", pady=(2, 8))
+        ttk.Radiobutton(method_row, text="Gradient descent", variable=self.method_var,
+                        value="gd", command=self._on_method_changed).pack(side="left")
+        ttk.Radiobutton(method_row, text="OLS", variable=self.method_var,
+                        value="ols", command=self._on_method_changed).pack(side="left",
+                                                                             padx=(10, 0))
+
+        ttk.Separator(body, orient="horizontal").pack(fill="x", pady=(0, 4))
+
+        # --- GD hyperparameters (disabled when OLS is active) ---
+        # Each _*_field returns (label_row_widget, active_widgets_list); we
+        # collect them so _on_method_changed can enable/disable in one loop.
+        self._gd_only_widgets: list[tk.Widget] = []
+
         self.learning_rate_var = tk.StringVar(value=str(RAW_LEARNING_RATE))
         self.epochs_var = tk.StringVar(value="10000")
         self.batch_size_var = tk.StringVar(value="100")
         self.tolerance_var = tk.StringVar(value="1e-4")
         self.standardize_var = tk.BooleanVar(value=False)
 
-        self._slider_field(body, "Learning Rate", self.learning_rate_var, 0.00001, 0.5)
-        self._slider_field(body, "Epochs", self.epochs_var, 10, 50000, is_int=True)
-        self._slider_field(body, "Batch Size", self.batch_size_var, 1, 500, is_int=True)
-        self._entry_field(body, "Stop Tolerance", self.tolerance_var)
+        self._gd_only_widgets += self._slider_field(
+            body, "Learning Rate", self.learning_rate_var, 0.00001, 0.5,
+            tooltip=HELP_LEARNING_RATE)
+        self._gd_only_widgets += self._slider_field(
+            body, "Epochs", self.epochs_var, 10, 50000, is_int=True,
+            tooltip=HELP_EPOCHS)
+        self._gd_only_widgets += self._slider_field(
+            body, "Batch Size", self.batch_size_var, 1, 500, is_int=True,
+            tooltip=HELP_BATCH_SIZE)
+        self._gd_only_widgets += self._entry_field(
+            body, "Stop Tolerance", self.tolerance_var, tooltip=HELP_TOLERANCE)
 
         ttk.Separator(body, orient="horizontal").pack(fill="x", pady=10)
-        ttk.Checkbutton(
-            body, text="Standardize\nfeatures (Z-score)", variable=self.standardize_var,
-            command=self._on_standardize_toggled,
-        ).pack(anchor="w")
+        standardize_row = ttk.Frame(body)
+        standardize_row.pack(anchor="w", fill="x")
+        self._standardize_checkbutton = ttk.Checkbutton(
+            standardize_row, text="Standardize features (Z-score)",
+            variable=self.standardize_var, command=self._on_standardize_toggled,
+        )
+        self._standardize_checkbutton.pack(side="left")
+        HelpHint(standardize_row, self.theme, HELP_STANDARDIZE).pack(side="left", padx=(4, 0))
+        self._gd_only_widgets.append(self._standardize_checkbutton)
         ttk.Label(
             body,
             text=("Z-scoring rescales the problem,\nso the learning rate is reset\n"
@@ -484,8 +965,13 @@ class TrainingApp(tk.Tk):
         logs_scroll.pack(side="right", fill="y")
 
     def _slider_field(self, parent, text: str, var: tk.StringVar, lo: float, hi: float,
-                      is_int: bool = False) -> None:
-        ttk.Label(parent, text=text, style="Small.TLabel").pack(anchor="w", pady=(8, 1))
+                      is_int: bool = False, tooltip: str = "") -> list[tk.Widget]:
+        """Returns the slider + entry widgets, so the caller can toggle their
+        enabled state (used when switching to OLS, which has no hyperparams)."""
+        if tooltip:
+            self._label_with_hint(parent, text, tooltip).pack(anchor="w", pady=(8, 1))
+        else:
+            ttk.Label(parent, text=text, style="Small.TLabel").pack(anchor="w", pady=(8, 1))
         slider = ttk.Scale(parent, from_=lo, to=hi, orient="horizontal")
         slider.pack(fill="x")
         entry = ttk.Entry(parent, textvariable=var)
@@ -514,6 +1000,7 @@ class TrainingApp(tk.Tk):
         entry.bind("<Return>", on_entry)
         entry.bind("<FocusOut>", on_entry)
         on_entry()
+        return [slider, entry]
 
     def _on_standardize_toggled(self) -> None:
         """Reset the learning rate to the default that suits the new scale."""
@@ -525,9 +1012,24 @@ class TrainingApp(tk.Tk):
             f"learning rate reset to {recommended}"
         )
 
-    def _entry_field(self, parent, text: str, var: tk.StringVar) -> None:
-        ttk.Label(parent, text=text, style="Small.TLabel").pack(anchor="w", pady=(8, 1))
-        ttk.Entry(parent, textvariable=var).pack(fill="x")
+    def _entry_field(self, parent, text: str, var: tk.StringVar, tooltip: str = "") -> list[tk.Widget]:
+        if tooltip:
+            self._label_with_hint(parent, text, tooltip).pack(anchor="w", pady=(8, 1))
+        else:
+            ttk.Label(parent, text=text, style="Small.TLabel").pack(anchor="w", pady=(8, 1))
+        entry = ttk.Entry(parent, textvariable=var)
+        entry.pack(fill="x")
+        return [entry]
+
+    def _on_method_changed(self) -> None:
+        """Enable/disable the GD-only widgets to reflect the current method."""
+        is_gd = self.method_var.get() == "gd"
+        for widget in self._gd_only_widgets:
+            try:
+                widget.configure(state="normal" if is_gd else "disabled")
+            except tk.TclError:
+                pass
+        self.log(f"Estimation method: {'gradient descent' if is_gd else 'ordinary least squares'}")
 
     def log(self, message: str) -> None:
         self.logs_text.configure(state="normal")
@@ -572,12 +1074,16 @@ class TrainingApp(tk.Tk):
             csv_path=str(self.current_csv_path),
             label_column=label_col,
             features=tuple(features),
+            method=self.method_var.get(),
             hyperparameters=hyperparameters,
+            separator=self._current_separator,
         )
 
     def _set_inputs_enabled(self, enabled: bool) -> None:
         self.start_button.configure(state="normal" if enabled else "disabled")
+        self.stop_button.configure(state="disabled" if enabled else "normal")
         self.csv_combo.configure(state="readonly" if enabled else "disabled")
+        self.browse_button.configure(state="normal" if enabled else "disabled")
         self.label_combo.configure(state="readonly" if enabled else "disabled")
         self.feature_dropdown.configure_state(enabled)
 
@@ -585,23 +1091,37 @@ class TrainingApp(tk.Tk):
         request = self._build_request()
         if request is None:
             return
-        hp = request.hyperparameters
 
         self._set_inputs_enabled(False)
         self.save_button.configure(state="disabled")
+        self.predict_button.configure(state="disabled")
         self.status_var.set("Training...")
-        self.log(f"Training started: label={request.label_column}, features={list(request.features)}")
-        self.log(
-            f"lr={hp.learning_rate}, batch={hp.batch_size}, epochs={hp.epochs}, "
-            f"tol={hp.tolerance}, standardize={hp.standardize_features}"
-        )
+        method_label = "gradient descent" if request.method == "gd" else "OLS (closed form)"
+        self.log(f"Training ({method_label}): label={request.label_column}, "
+                 f"features={list(request.features)}")
+        if request.method == "gd":
+            hp = request.hyperparameters
+            self.log(
+                f"lr={hp.learning_rate}, batch={hp.batch_size}, epochs={hp.epochs}, "
+                f"tol={hp.tolerance}, standardize={hp.standardize_features}"
+            )
         self.status_bar.set_text(
-            f"Training {request.label_column} ~ {' + '.join(request.features)} ..."
+            f"Training ({method_label}): {request.label_column} ~ "
+            f"{' + '.join(request.features)} ..."
         )
         self._training_start_time = time.monotonic()
         self._tick_stopwatch()
 
         self.controller.start(request, self._on_training_finished, self._on_training_failed)
+
+    def _on_stop_training(self) -> None:
+        if not self.controller.is_running:
+            return
+        self.stop_button.configure(state="disabled")
+        self.status_var.set("Stopping...")
+        self.status_bar.set_text("Stopping training...")
+        self.log("Stop requested by user.")
+        self.controller.stop()
 
     def _tick_stopwatch(self) -> None:
         self.stopwatch_var.set(format_elapsed(time.monotonic() - self._training_start_time))
@@ -610,6 +1130,11 @@ class TrainingApp(tk.Tk):
 
     def _on_training_failed(self, error: Exception) -> None:
         self._set_inputs_enabled(True)
+        if isinstance(error, TrainingCancelled):
+            self.status_var.set("Stopped")
+            self.log("Training stopped by user.")
+            self.status_bar.set_text("Training stopped - ready for a new run")
+            return
         self.status_var.set("Failed")
         self.log(f"ERROR: {error}")
         self.status_bar.set_text("Training failed - see the Logs tab")
@@ -618,6 +1143,7 @@ class TrainingApp(tk.Tk):
     def _on_training_finished(self, result: TrainingResult) -> None:
         self._set_inputs_enabled(True)
         self._last_result = result
+        self._last_model = self._rebuild_predict_only_model(result)
         self.save_button.configure(state="normal")
 
         rows = metrics_rows(result.y_true, result.y_pred, n_features=len(result.request.features))
@@ -625,14 +1151,127 @@ class TrainingApp(tk.Tk):
         for name, value in rows:
             self.metrics_tree.insert("", tk.END, values=(name, f"{value:.5f}"))
 
+        self._populate_inference_and_collinearity(result)
+        self._rebuild_testing_form(result.request.features)
+        self._rebuild_calibration_choices(result.request.features)
         self._render_charts()
 
-        self.status_var.set(f"Done - {result.epochs_run} epochs")
-        self.status_bar.set_text(
-            f"Training complete - {result.epochs_run} epochs, final MSE {result.final_loss:.5f}"
-        )
-        self.log(f"Finished in {result.epochs_run} epochs, final MSE={result.final_loss:.6f}")
+        # Adapt status text to what the method actually produced: GD reports
+        # epochs and a final loss; OLS just landed on the exact minimum.
+        if result.request.method == "gd" and result.epochs_run is not None:
+            self.status_var.set(f"Done - {result.epochs_run} epochs")
+            self.status_bar.set_text(
+                f"Training complete - {result.epochs_run} epochs, "
+                f"final MSE {result.final_loss:.5f}"
+            )
+            self.log(f"Finished in {result.epochs_run} epochs, "
+                     f"final MSE={result.final_loss:.6f}")
+        else:
+            self.status_var.set("Done - closed form")
+            self.status_bar.set_text("Training complete - OLS closed-form solution")
+            self.log(f"OLS finished in {result.elapsed_seconds*1000:.1f} ms")
         self.log(f"weights={result.weights}, bias={result.bias:.6f}")
+
+    def _rebuild_predict_only_model(self, result: TrainingResult) -> Model:
+        """Rebuild a Model whose predict() reproduces this run's fit.
+
+        The scaling comes from the training run: GD may have Z-scored, OLS
+        never does. We recover it from `result.x_train` (raw features) so
+        predict() reapplies the same transform.
+        """
+        used_standardization = (
+            result.request.method == "gd"
+            and result.request.hyperparameters.standardize_features
+            and result.x_train.size
+        )
+        if used_standardization:
+            feature_mean = result.x_train.mean(axis=0)
+            feature_std = result.x_train.std(axis=0)
+            # matches the standardize() helper's guard for constant columns
+            feature_std = np.where(feature_std == 0, 1.0, feature_std)
+        else:
+            feature_mean = feature_std = None
+        return Model(
+            csv_file=result.request.csv_path,
+            label_column=result.request.label_column,
+            features=list(result.request.features),
+            x_train=result.x_train,
+            y_train=result.y_true,
+            weights=np.asarray(result.weights, dtype=float),
+            bias=float(result.bias),
+            feature_mean=feature_mean,
+            feature_std=feature_std,
+        )
+
+    def _populate_inference_and_collinearity(self, result: TrainingResult) -> None:
+        """Fill the Inference and Collinearity tabs.
+
+        Inference (SE / t / p / F) is only defined for the exact least-squares
+        solution, so it is skipped for GD runs - the tab just displays a
+        message pointing the user to OLS. VIF only depends on X, so it runs
+        for both methods.
+        """
+        self.inference_tree.delete(*self.inference_tree.get_children())
+        self.vif_tree.delete(*self.vif_tree.get_children())
+
+        x_raw = np.asarray(result.x_train, dtype=float)
+        y = np.asarray(result.y_true, dtype=float)
+        feature_names = list(result.request.features)
+
+        if result.request.method != "ols":
+            self.f_stat_var.set(INFERENCE_GD_MESSAGE)
+        else:
+            try:
+                ols_fit = fit_ols(x_raw, y)
+                summary = summarize_inference(x_raw, y, ols_fit,
+                                              feature_names=feature_names)
+            except ValueError as exc:
+                self.f_stat_var.set(f"Inference unavailable: {exc}")
+                self.log(f"Inference: {exc}")
+            else:
+                self._populate_inference_table(summary)
+
+        try:
+            columns = {name: x_raw[:, i] for i, name in enumerate(feature_names)}
+            vifs = variance_inflation_factors(columns) if len(feature_names) > 1 else None
+        except ValueError as exc:
+            self.log(f"VIF: {exc}")
+            self.vif_tree.insert("", tk.END, values=("(error)", str(exc)))
+        else:
+            self._populate_vif_table(vifs, feature_names)
+
+    def _populate_inference_table(self, summary: InferenceSummary) -> None:
+        for name, coef, se, t_val, p_val in zip(
+            summary.names, summary.coefficients, summary.standard_errors,
+            summary.t_statistics, summary.p_values,
+        ):
+            self.inference_tree.insert(
+                "", tk.END,
+                values=(name, f"{coef:.5f}", f"{se:.5f}", f"{t_val:.4f}",
+                        _format_p_value(p_val)),
+            )
+        # F-statistic uses the same OLS predictions the summary is built on,
+        # reconstructed from summary.coefficients (intercept + weights).
+        result = self._last_result
+        y_pred_ols = _predict_with_ols_summary(summary, result.x_train)
+        try:
+            f = f_statistic(result.y_true, y_pred_ols,
+                            n_features=len(result.request.features))
+            self.f_stat_var.set(
+                f"F-statistic = {f:.2f}  |  df = {summary.degrees_of_freedom}"
+            )
+        except ValueError as exc:
+            self.f_stat_var.set(f"F-statistic unavailable: {exc}")
+
+    def _populate_vif_table(self, vifs, feature_names: list[str]) -> None:
+        if vifs is None:
+            self.vif_tree.insert("", tk.END, values=("(single feature)", "n/a"))
+            return
+        # keep the original feature ordering, not dict-insertion order
+        for name in feature_names:
+            value = vifs.get(name)
+            display = "-" if value is None else f"{value:.3f}"
+            self.vif_tree.insert("", tk.END, values=(name, display))
 
     # ------------------------------------------------------------------ #
     # Saving results
@@ -653,6 +1292,21 @@ class TrainingApp(tk.Tk):
         saved = save_results_report(self._last_result, path)
         self.log(f"Report saved to {saved}")
         self.status_bar.set_text(f"Report saved to {saved}")
+
+
+def _format_p_value(p: float) -> str:
+    """Render a p-value the way ISLR tables do: tiny values become '< 1e-4'."""
+    if p < 1e-4:
+        return "< 0.0001"
+    return f"{p:.4f}"
+
+
+def _predict_with_ols_summary(summary: InferenceSummary, X: np.ndarray) -> np.ndarray:
+    """Reconstruct y_pred from an InferenceSummary. The first coefficient is
+    the intercept, the rest are the feature weights."""
+    intercept = summary.coefficients[0]
+    weights = summary.coefficients[1:]
+    return intercept + np.asarray(X, dtype=float) @ weights
 
 
 if __name__ == "__main__":

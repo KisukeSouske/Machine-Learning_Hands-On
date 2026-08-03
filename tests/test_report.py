@@ -23,6 +23,7 @@ def _make_result(standardize: bool = False) -> TrainingResult:
     return TrainingResult(
         request=request,
         loss_history=(100.0, 20.0, 12.5),
+        x_train=np.array([[10.0, 5.0], [20.0, 8.0], [30.0, 11.0], [40.0, 14.0]]),
         y_true=np.array([1.0, 2.0, 3.0, 4.0]),
         y_pred=np.array([1.0, 2.0, 3.0, 4.0]),
         weights=np.array([2.0, 3.0]),

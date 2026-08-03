@@ -18,8 +18,7 @@ from kai.metrics import (
     mean_squared_error_derivation,
     r_squared,
     squared_loss,
-    total_sum_of_squares,
-)
+    total_sum_of_squares)
 from kai.model import Model
 
 
@@ -52,24 +51,27 @@ def test_standardized_run_lands_on_the_closed_form_optimum(tmp_path):
     rows = np.genfromtxt(csv_path, delimiter=",", skip_header=1)
     slope_star, intercept_star = _ols(rows[:, 0], rows[:, 1])
 
-    model = Model(csv_path, "y")
-    model.start_training(["x"], learning_rate=0.5, show_plot=False,
-                         standardize_features=True, random_state=0)
+    trained = Model.fit_gradient_descent(csv_path, "y", ["x"], learning_rate=0.5,
+                                          standardize_features=True, random_state=0)
+    model = trained.model
 
-    slope = float(model.weight[0]) / model._feature_std[0]
-    intercept = float(model.bias) - float(model.weight[0]) * model._feature_mean[0] / model._feature_std[0]
+    slope = float(model.weight[0]) / model.feature_std[0]
+    intercept = float(model.bias) - float(model.weight[0]) * model.feature_mean[0] / model.feature_std[0]
     assert slope == pytest.approx(slope_star, rel=1e-6)
     assert intercept == pytest.approx(intercept_star, rel=1e-6)
 
 
 # --- F2: the criterion is relative, so it must be invariant to the scale of y ---
 def test_stopping_epoch_is_invariant_to_target_scale(tmp_path):
-    small = Model(_linear_csv(tmp_path, y_scale=1.0), "y")
-    large = Model(_linear_csv(tmp_path, y_scale=1000.0), "y")
-    for model in (small, large):
-        model.start_training(["x"], learning_rate=0.05, show_plot=False,
-                             standardize_features=True, random_state=0)
-    assert len(small.loss_history) == len(large.loss_history)
+    trained_small = Model.fit_gradient_descent(
+        _linear_csv(tmp_path, y_scale=1.0), "y", ["x"],
+        learning_rate=0.05, standardize_features=True, random_state=0,
+    )
+    trained_large = Model.fit_gradient_descent(
+        _linear_csv(tmp_path, y_scale=1000.0), "y", ["x"],
+        learning_rate=0.05, standardize_features=True, random_state=0,
+    )
+    assert len(trained_small.loss_history) == len(trained_large.loss_history)
 
 
 def test_tighter_tolerance_runs_longer_and_lands_closer(tmp_path):
@@ -79,11 +81,11 @@ def test_tighter_tolerance_runs_longer_and_lands_closer(tmp_path):
 
     errors = {}
     for tolerance in (1e-2, 1e-5):
-        model = Model(csv_path, "y")
-        model.start_training(["x"], learning_rate=0.05, tolerance=tolerance,
-                             show_plot=False, standardize_features=True, random_state=0)
-        slope = float(model.weight[0]) / model._feature_std[0]
-        errors[tolerance] = (len(model.loss_history), abs(slope - slope_star))
+        trained = Model.fit_gradient_descent(csv_path, "y", ["x"],
+                                              learning_rate=0.05, tolerance=tolerance,
+                                              standardize_features=True, random_state=0)
+        slope = float(trained.model.weight[0]) / trained.model.feature_std[0]
+        errors[tolerance] = (len(trained.loss_history), abs(slope - slope_star))
 
     assert errors[1e-5][0] > errors[1e-2][0]      # more epochs
     assert errors[1e-5][1] < errors[1e-2][1]      # closer to the optimum
@@ -115,10 +117,11 @@ def test_random_state_makes_minibatch_training_reproducible(tmp_path):
     csv_path = _linear_csv(tmp_path)
     runs = []
     for _ in range(2):
-        model = Model(csv_path, "y")
-        model.start_training(["x"], learning_rate=0.05, batch_size=8, show_plot=False,
-                             standardize_features=True, random_state=123)
-        runs.append((len(model.loss_history), float(model.weight[0]), float(model.bias)))
+        trained = Model.fit_gradient_descent(csv_path, "y", ["x"],
+                                              learning_rate=0.05, batch_size=8,
+                                              standardize_features=True, random_state=123)
+        runs.append((len(trained.loss_history),
+                     float(trained.model.weight[0]), float(trained.model.bias)))
     assert runs[0] == runs[1]
 
 
