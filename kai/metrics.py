@@ -1,5 +1,6 @@
 import numpy as np
-import pandas as pd
+
+GAMMA_ETA_CLIP = 30.0
 
 def _as_arrays(y_true, y_pred) -> tuple[np.ndarray, np.ndarray]:
     # Accepts any array-like (list, tuple, Series, ndarray) and validates shapes,
@@ -108,6 +109,44 @@ def total_sum_of_squares(y_true: np.ndarray) -> float:
     """
     y_true = np.asarray(y_true, dtype=float)
     return np.sum((y_true - np.mean(y_true)) ** 2)
+
+def gamma_log_inverse_link(eta: np.ndarray) -> np.ndarray:
+    """μ = exp(η), com clipping para evitar overflow durante a busca."""
+    return np.exp(np.clip(eta, -GAMMA_ETA_CLIP, GAMMA_ETA_CLIP))
+
+def gamma_log_nll(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """
+        Mean Gamma negative log-likelihood up to additive constants in beta.
+        Here, y_pred is mu (already passed through the inverse link), not eta.
+    """
+    y_true, y_pred = _as_arrays(y_true, y_pred)
+    if np.any(y_pred <= 0):
+        raise ValueError("Predicted values must be positive for the Gamma distribution.")
+    return np.sum(y_true / y_pred + np.log(y_pred))
+
+def gamma_log_nll_derivation(y_true: np.ndarray, y_pred: np.ndarray, x_true: np.ndarray) -> tuple[np.ndarray, float]:
+    """
+    Calculate the partial derivatives of the Gamma negative log-likelihood
+    with respect to the weights and the bias.
+
+    Parameters:
+    y_true (np.ndarray): True values, shape (n_samples,).
+    y_pred (np.ndarray): Predicted values (mu), shape (n_samples,).
+    x_true (np.ndarray): Feature values, shape (n_samples, n_features).
+
+    Returns:
+    tuple[np.ndarray, float]: The (weight_derivation, bias_derivation) gradients.
+        weight_derivation has shape (n_features,).
+    """
+    y_true, y_pred = _as_arrays(y_true, y_pred)
+    x_true = np.asarray(x_true, dtype=float)
+    if x_true.shape[0] != y_true.shape[0]:
+        raise ValueError("x_true must have the same number of samples as y_true.")
+
+    error = (y_pred - y_true) / y_pred
+    weight_derivation = -(x_true.T @ error) / y_true.size
+    bias_derivation = float(np.sum(error) / y_true.size)
+    return weight_derivation, bias_derivation
 
 def r_squared(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     # R-squared: the proportion of variance explained by the model; values near 1 indicate a good fit, while values below 0 mean the model is worse than simply predicting the mean.

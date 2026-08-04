@@ -22,6 +22,7 @@ from scipy import stats as scipy_stats
 
 from kai.metrics import mean_squared_error, mean_squared_error_derivation, r_squared, squared_loss
 
+from collections.abc import Callable
 
 class TrainingCancelled(Exception):
     """Raised by `fit_gradient_descent` when `cancel_event` is set mid-run."""
@@ -49,6 +50,29 @@ class LinearFit:
         if X.ndim == 1 and self.weights.shape[0] == 1:
             X = X.reshape(-1, 1)
         return self.bias + X @ self.weights
+    
+@dataclass(frozen=True)
+class _Family:
+    inverse_link: Callable[[np.ndarray], np.ndarray]
+    loss: Callable[[np.ndarray, np.ndarray], float]
+    gradient: Callable[..., tuple[np.ndarray, float]]
+    init_bias: Callable[[np.ndarray], float]
+
+
+_FAMILIES = {
+    ('mse', 'identity'): _Family(
+        inverse_link=lambda eta: eta,
+        loss=mean_squared_error,
+        gradient=mean_squared_error_derivation,
+        init_bias=lambda y: 0.0,
+    ),
+    ('gamma', 'log'): _Family(
+        inverse_link=gamma_log_inverse_link,
+        loss=gamma_log_nll,
+        gradient=gamma_log_nll_derivation,
+        init_bias=lambda y: float(np.log(np.mean(y))),
+    ),
+}
 
 
 def _as_design_inputs(X, y) -> tuple[np.ndarray, np.ndarray]:
@@ -179,6 +203,7 @@ def fit_gradient_descent(
     tolerance: float = 1e-4,
     random_state: int | None = None,
     cancel_event: threading.Event | None = None,
+    loss_function: str = 'mse',
 ) -> LinearFit:
     """Fit y ~ X by mini-batch gradient descent.
 
