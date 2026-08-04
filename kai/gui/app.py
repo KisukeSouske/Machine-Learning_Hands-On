@@ -157,6 +157,15 @@ HELP_VIF = (
     "inflated by collinearity with the other predictors. VIF = 1 means no "
     "collinearity; > 5 or 10 is a common warning threshold (ISLR p.102)."
 )
+HELP_PREDICTORS = (
+    "One row per predictor. 'Coefficient' is always in ORIGINAL units - how "
+    "much the response moves per one unit of that predictor - so it stays "
+    "comparable across runs even when training standardized the features. "
+    "'Std. coef' is the same effect per one standard deviation, which is what "
+    "you compare when predictors are measured on different scales: a small "
+    "coefficient on a wide-ranging variable can matter more than a large one "
+    "on a narrow variable. 'VIF' flags collinearity with the other predictors."
+)
 HELP_INTERVALS = (
     "95% confidence interval: uncertainty about the MEAN response at this "
     "input. 95% prediction interval: uncertainty about a single NEW "
@@ -738,26 +747,35 @@ class TrainingApp(tk.Tk):
         self.inference_tree.pack(side="left", fill="both", expand=True)
         inf_scrollbar.pack(side="right", fill="y")
 
-        # --- Collinearity tab: VIF per feature ---
-        collinearity_tab = ttk.Frame(notebook)
-        notebook.add(collinearity_tab, text="Collinearity")
-        vif_row = ttk.Frame(collinearity_tab)
-        vif_row.pack(fill="x", pady=(0, 4))
-        ttk.Label(vif_row, text="Variance Inflation Factors",
+        # --- Predictors tab: the fitted coefficient of each predictor, with
+        # its VIF alongside so collinearity is read next to the number it
+        # actually undermines (a large coefficient on a highly collinear
+        # predictor is not the stable effect it looks like).
+        predictors_tab = ttk.Frame(notebook)
+        notebook.add(predictors_tab, text="Predictors")
+        predictors_row = ttk.Frame(predictors_tab)
+        predictors_row.pack(fill="x", pady=(0, 4))
+        self.predictors_note_var = tk.StringVar(value="Coefficients in original units.")
+        ttk.Label(predictors_row, textvariable=self.predictors_note_var,
                   style="Small.TLabel").pack(side="left")
-        HelpHint(vif_row, self.theme, HELP_VIF).pack(side="left", padx=(4, 0))
+        HelpHint(predictors_row, self.theme, HELP_PREDICTORS).pack(side="left", padx=(4, 0))
+        HelpHint(predictors_row, self.theme, HELP_VIF).pack(side="left", padx=(2, 0))
 
-        self.vif_tree = ttk.Treeview(collinearity_tab, columns=("feature", "vif"),
-                                      show="headings", height=6)
-        self.vif_tree.heading("feature", text="Feature")
-        self.vif_tree.heading("vif", text="VIF")
-        self.vif_tree.column("feature", anchor="w", width=180)
-        self.vif_tree.column("vif", anchor="e", width=120)
-        vif_scrollbar = ttk.Scrollbar(collinearity_tab, orient="vertical",
-                                       command=self.vif_tree.yview)
-        self.vif_tree.configure(yscrollcommand=vif_scrollbar.set)
-        self.vif_tree.pack(side="left", fill="both", expand=True)
-        vif_scrollbar.pack(side="right", fill="y")
+        predictor_cols = ("feature", "coef", "std_coef", "vif")
+        self.predictors_tree = ttk.Treeview(predictors_tab, columns=predictor_cols,
+                                            show="headings", height=6)
+        predictor_headings = [("feature", "Predictor", "w", 140),
+                              ("coef", "Coefficient", "e", 110),
+                              ("std_coef", "Std. coef", "e", 100),
+                              ("vif", "VIF", "e", 80)]
+        for key, label, anchor, width in predictor_headings:
+            self.predictors_tree.heading(key, text=label)
+            self.predictors_tree.column(key, anchor=anchor, width=width)
+        predictors_scrollbar = ttk.Scrollbar(predictors_tab, orient="vertical",
+                                             command=self.predictors_tree.yview)
+        self.predictors_tree.configure(yscrollcommand=predictors_scrollbar.set)
+        self.predictors_tree.pack(side="left", fill="both", expand=True)
+        predictors_scrollbar.pack(side="right", fill="y")
 
     def _build_status_panel(self, parent) -> None:
         self.stopwatch_var = tk.StringVar(value=format_elapsed(0))
@@ -1179,18 +1197,8 @@ class TrainingApp(tk.Tk):
         never does. We recover it from `result.x_train` (raw features) so
         predict() reapplies the same transform.
         """
-        used_standardization = (
-            result.request.method == "gd"
-            and result.request.hyperparameters.standardize_features
-            and result.x_train.size
-        )
-        if used_standardization:
-            feature_mean = result.x_train.mean(axis=0)
-            feature_std = result.x_train.std(axis=0)
-            # matches the standardize() helper's guard for constant columns
-            feature_std = np.where(feature_std == 0, 1.0, feature_std)
-        else:
-            feature_mean = feature_std = None
+        scaling = _training_scaling(result)
+        feature_mean, feature_std = scaling if scaling is not None else (None, None)
         return Model(
             csv_file=result.request.csv_path,
             label_column=result.request.label_column,
@@ -1204,15 +1212,15 @@ class TrainingApp(tk.Tk):
         )
 
     def _populate_inference_and_collinearity(self, result: TrainingResult) -> None:
-        """Fill the Inference and Collinearity tabs.
+        """Fill the Inference and Predictors tabs.
 
         Inference (SE / t / p / F) is only defined for the exact least-squares
         solution, so it is skipped for GD runs - the tab just displays a
-        message pointing the user to OLS. VIF only depends on X, so it runs
-        for both methods.
+        message pointing the user to OLS. Coefficients and VIF are defined for
+        both methods, so the Predictors tab is always populated.
         """
         self.inference_tree.delete(*self.inference_tree.get_children())
-        self.vif_tree.delete(*self.vif_tree.get_children())
+        self.predictors_tree.delete(*self.predictors_tree.get_children())
 
         x_raw = np.asarray(result.x_train, dtype=float)
         y = np.asarray(result.y_true, dtype=float)
@@ -1236,9 +1244,8 @@ class TrainingApp(tk.Tk):
             vifs = variance_inflation_factors(columns) if len(feature_names) > 1 else None
         except ValueError as exc:
             self.log(f"VIF: {exc}")
-            self.vif_tree.insert("", tk.END, values=("(error)", str(exc)))
-        else:
-            self._populate_vif_table(vifs, feature_names)
+            vifs = None
+        self._populate_predictors_table(result, vifs)
 
     def _populate_inference_table(self, summary: InferenceSummary) -> None:
         for name, coef, se, t_val, p_val in zip(
@@ -1263,15 +1270,41 @@ class TrainingApp(tk.Tk):
         except ValueError as exc:
             self.f_stat_var.set(f"F-statistic unavailable: {exc}")
 
-    def _populate_vif_table(self, vifs, feature_names: list[str]) -> None:
-        if vifs is None:
-            self.vif_tree.insert("", tk.END, values=("(single feature)", "n/a"))
-            return
-        # keep the original feature ordering, not dict-insertion order
-        for name in feature_names:
-            value = vifs.get(name)
-            display = "-" if value is None else f"{value:.3f}"
-            self.vif_tree.insert("", tk.END, values=(name, display))
+    def _populate_predictors_table(self, result: TrainingResult, vifs) -> None:
+        """One row per predictor: coefficient, standardized coefficient, VIF.
+
+        VIF is undefined for a single predictor (there is nothing to be
+        collinear with) and may be missing if its computation failed; both
+        show as "-" rather than dropping the row, so the coefficient is still
+        visible.
+        """
+        feature_names = list(result.request.features)
+        x_raw = np.asarray(result.x_train, dtype=float)
+        coefficients = _coefficients_in_original_space(result)
+        spreads = x_raw.std(axis=0) if x_raw.size else np.ones(len(feature_names))
+
+        standardized = (result.request.method == "gd"
+                        and result.request.hyperparameters.standardize_features)
+        self.predictors_note_var.set(
+            "Coefficients converted back to original units."
+            if standardized else "Coefficients in original units."
+        )
+
+        for index, name in enumerate(feature_names):
+            coefficient = float(coefficients[index])
+            vif_value = vifs.get(name) if vifs else None
+            self.predictors_tree.insert(
+                "", tk.END,
+                values=(name, f"{coefficient:.5f}",
+                        f"{coefficient * float(spreads[index]):.5f}",
+                        "-" if vif_value is None else f"{vif_value:.3f}"),
+            )
+        # the intercept completes the fitted equation but is not a predictor:
+        # it has no spread to scale by and nothing to be collinear with
+        self.predictors_tree.insert(
+            "", tk.END,
+            values=("(intercept)", f"{_intercept_in_original_space(result):.5f}", "-", "-"),
+        )
 
     # ------------------------------------------------------------------ #
     # Saving results
@@ -1307,6 +1340,57 @@ def _predict_with_ols_summary(summary: InferenceSummary, X: np.ndarray) -> np.nd
     intercept = summary.coefficients[0]
     weights = summary.coefficients[1:]
     return intercept + np.asarray(X, dtype=float) @ weights
+
+
+def _training_scaling(result: TrainingResult):
+    """The (mean, std) a run standardized with, or None if it trained on raw
+    features.
+
+    Single source of truth for what space `result.weights` live in: predict(),
+    the Predictors tab and anything else reporting coefficients must agree, or
+    they silently disagree by a factor of the feature's spread.
+    """
+    x_raw = np.asarray(result.x_train, dtype=float)
+    standardized = (
+        result.request.method == "gd"
+        and result.request.hyperparameters.standardize_features
+        and x_raw.size
+    )
+    if not standardized:
+        return None
+    spread = x_raw.std(axis=0)
+    # matches the standardize() helper's guard for constant columns
+    return x_raw.mean(axis=0), np.where(spread == 0, 1.0, spread)
+
+
+def _coefficients_in_original_space(result: TrainingResult) -> np.ndarray:
+    """Feature coefficients expressed per one RAW unit of each predictor.
+
+    A standardized run stores weights per standard deviation; dividing by the
+    spread converts them back, so the reported number always answers the same
+    question regardless of how the model was trained.
+    """
+    weights = np.asarray(result.weights, dtype=float)
+    scaling = _training_scaling(result)
+    if scaling is None:
+        return weights
+    _mean, spread = scaling
+    return weights / spread
+
+
+def _intercept_in_original_space(result: TrainingResult) -> float:
+    """The intercept of the same original-units equation.
+
+    Undoing the centering moves part of each feature's effect into the
+    constant term, so this is not simply `result.bias` for a standardized run.
+    """
+    weights = np.asarray(result.weights, dtype=float)
+    bias = float(result.bias)
+    scaling = _training_scaling(result)
+    if scaling is None:
+        return bias
+    mean, spread = scaling
+    return bias - float(np.sum(weights * mean / spread))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,5 @@
+# Extra dependencies needed to run the full test suite (not used by kai itself).
+# statsmodels is the independent, peer-used implementation the inference tests
+# in tests/test_regression_inference.py cross-validate against.
+-r requirements.txt
+statsmodels>=0.14

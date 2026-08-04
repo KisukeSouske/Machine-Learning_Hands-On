@@ -1,5 +1,7 @@
 import csv
 
+import pytest
+
 from kai.gui import (
     count_csv_data_rows,
     detect_csv_separator,
@@ -161,3 +163,75 @@ def test_format_prediction_does_not_flatten_small_values_to_zero():
 def test_format_prediction_stays_within_the_readout_budget():
     values = [218.0, -12345.6789, 1.23e12, 4.5e-9, -9.87e-15, 0.0]
     assert all(len(format_prediction(v)) <= 13 for v in values)
+
+
+# Test cases for the Predictors tab's coefficient conversion
+import numpy as np
+
+from kai.gui.app import _coefficients_in_original_space, _intercept_in_original_space
+from kai.gui.state import Hyperparameters, TrainingRequest, TrainingResult
+
+
+def _result(method, standardize_features, weights, bias, x_train):
+    return TrainingResult(
+        request=TrainingRequest(
+            csv_path="x.csv", label_column="y", features=("a", "b"), method=method,
+            hyperparameters=Hyperparameters(standardize_features=standardize_features),
+        ),
+        x_train=np.asarray(x_train, dtype=float),
+        y_true=np.zeros(len(x_train)), y_pred=np.zeros(len(x_train)),
+        weights=np.asarray(weights, dtype=float), bias=float(bias),
+        elapsed_seconds=0.0, loss_history=None if method == "ols" else (1.0,),
+    )
+
+
+def test_coefficients_are_passed_through_for_an_unstandardized_run():
+    x_train = [[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]]
+    result = _result("ols", False, [2.0, 5.0], 7.0, x_train)
+
+    assert list(_coefficients_in_original_space(result)) == [2.0, 5.0]
+    assert _intercept_in_original_space(result) == 7.0
+
+
+def test_standardized_coefficients_are_converted_back_to_raw_units():
+    # weights stored per standard deviation must be divided by that spread to
+    # answer "per one raw unit"
+    x_train = np.array([[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]])
+    spread = x_train.std(axis=0)
+    result = _result("gd", True, [2.0 * spread[0], 5.0 * spread[1]], 7.0, x_train)
+
+    assert list(_coefficients_in_original_space(result)) == pytest.approx([2.0, 5.0])
+
+
+def test_standardized_equation_reproduces_the_scaled_model():
+    # the reported intercept + coefficients must predict exactly what the
+    # standardized model predicts, otherwise the tab describes a different model
+    rng = np.random.default_rng(3)
+    x_train = rng.uniform(1.0, 50.0, size=(30, 2))
+    mean, spread = x_train.mean(axis=0), x_train.std(axis=0)
+    weights, bias = np.array([1.3, -0.7]), 4.2
+    result = _result("gd", True, weights, bias, x_train)
+
+    probe = np.array([[10.0, 20.0], [33.0, 5.0]])
+    scaled = bias + ((probe - mean) / spread) @ weights
+    reported = _intercept_in_original_space(result) + probe @ _coefficients_in_original_space(result)
+    assert reported == pytest.approx(scaled)
+
+
+def test_gradient_descent_without_standardizing_keeps_raw_weights():
+    x_train = [[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]]
+    result = _result("gd", False, [2.0, 5.0], 7.0, x_train)
+
+    assert list(_coefficients_in_original_space(result)) == [2.0, 5.0]
+    assert _intercept_in_original_space(result) == 7.0
+
+
+def test_constant_column_does_not_divide_by_zero():
+    # a zero-spread column would blow up the conversion; it is guarded the
+    # same way the standardize() helper guards it
+    x_train = [[5.0, 1.0], [5.0, 2.0], [5.0, 3.0]]
+    result = _result("gd", True, [2.0, 5.0], 7.0, x_train)
+
+    coefficients = _coefficients_in_original_space(result)
+    assert np.isfinite(coefficients).all()
+    assert coefficients[0] == 2.0
