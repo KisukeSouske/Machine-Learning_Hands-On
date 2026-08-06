@@ -1,7 +1,18 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from kai.metrics import loss, squared_loss, mean_squared_error, r_squared, adjusted_r_squared
+from kai.metrics import (
+    adjusted_r_squared,
+    gamma_deviance,
+    gamma_deviance_residuals,
+    gamma_explained_deviance,
+    gamma_log_nll,
+    loss,
+    mean_absolute_error,
+    mean_squared_error,
+    r_squared,
+    squared_loss,
+)
 from kai.themes.base import ChartStyle
 from kai.themes.default import DEFAULT_THEME
 
@@ -30,6 +41,32 @@ CHART_LABELS = {
 # how many points to sample along a predictor when tracing its calibration line
 CALIBRATION_LINE_POINTS = 100
 
+# GLM families the training engine can fit, keyed by (loss_function, link).
+# Kept here so the GUI dropdown, the loss-curve axis, the metrics table and the
+# saved report all name the same thing the same way.
+FAMILY_GAUSSIAN = ("mse", "identity")
+FAMILY_GAMMA_LOG = ("gamma", "log")
+
+FAMILY_LABELS = {
+    FAMILY_GAUSSIAN: "Normal / identity (least squares)",
+    FAMILY_GAMMA_LOG: "Gamma / log (GLM)",
+}
+
+FAMILY_LOSS_LABELS = {
+    FAMILY_GAUSSIAN: "MSE",
+    FAMILY_GAMMA_LOG: "Mean Gamma NLL",
+}
+
+
+def family_label(family: tuple[str, str]) -> str:
+    """Human-readable name of a family, falling back to the raw key."""
+    return FAMILY_LABELS.get(tuple(family), " / ".join(family))
+
+
+def family_loss_label(family: tuple[str, str]) -> str:
+    """Name of the objective a run of this family descends."""
+    return FAMILY_LOSS_LABELS.get(tuple(family), "Loss")
+
 
 def _style_panel(ax, style: ChartStyle) -> None:
     ax.set_facecolor(style.panel_bg)
@@ -39,7 +76,8 @@ def _style_panel(ax, style: ChartStyle) -> None:
         spine.set_visible(False)
 
 
-def draw_loss_curve(ax, loss_history: list, style: ChartStyle = DEFAULT_CHART_STYLE) -> None:
+def draw_loss_curve(ax, loss_history: list, style: ChartStyle = DEFAULT_CHART_STYLE,
+                    loss_label: str = "MSE") -> None:
     loss_values = np.asarray(loss_history, dtype=float)
     finite_mask = np.isfinite(loss_values)
     epochs = np.arange(1, len(loss_values) + 1)
@@ -47,20 +85,38 @@ def draw_loss_curve(ax, loss_history: list, style: ChartStyle = DEFAULT_CHART_ST
     ax.plot(epochs[finite_mask], loss_values[finite_mask], color=style.loss_color, linewidth=2.5)
     ax.set_title("Loss curve")
     ax.set_xlabel("Epoch")
-    ax.set_ylabel("MSE")
+    # the curve is whatever objective the run descended; labelling it "MSE"
+    # for a Gamma run would name a quantity that was never computed
+    ax.set_ylabel(loss_label)
 
 
-def draw_residuals_plot(ax, y_true: np.ndarray, y_pred: np.ndarray, style: ChartStyle = DEFAULT_CHART_STYLE) -> None:
+def draw_residuals_plot(ax, y_true: np.ndarray, y_pred: np.ndarray,
+                        style: ChartStyle = DEFAULT_CHART_STYLE,
+                        family: tuple[str, str] = FAMILY_GAUSSIAN) -> None:
     # residuals vs predicted: the classic diagnostic for non-linearity and
     # heteroscedasticity (residuals should scatter randomly around 0, with no
     # funnel shape and no curved pattern)
-    residuals = y_true - y_pred
     _style_panel(ax, style)
+    if tuple(family) == FAMILY_GAMMA_LOG:
+        # A Gamma fit is heteroscedastic BY ASSUMPTION - the spread of y - mu
+        # grows with mu - so a raw residual plot funnels even when the model is
+        # perfect, and the usual reading of that shape does not apply. Deviance
+        # residuals put every point on a comparable scale, which restores the
+        # "scatter flat around 0" test the chart exists to support.
+        residuals = gamma_deviance_residuals(y_true, y_pred)
+        title = "Deviance residuals vs Fitted"
+        ylabel = "Deviance residual"
+        xlabel = "Fitted mean (mu)"
+    else:
+        residuals = np.asarray(y_true, dtype=float) - np.asarray(y_pred, dtype=float)
+        title = "Residuals vs Predicted"
+        ylabel = "Residual (actual - predicted)"
+        xlabel = "Predicted"
     ax.scatter(y_pred, residuals, color=style.scatter_color, alpha=0.8, zorder=3)
     ax.axhline(0, color=style.accent_color, linewidth=2, zorder=4)
-    ax.set_title("Residuals vs Predicted")
-    ax.set_xlabel("Predicted")
-    ax.set_ylabel("Residual (actual - predicted)")
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
 
 
 def draw_predicted_vs_actual_plot(ax, y_true: np.ndarray, y_pred: np.ndarray, style: ChartStyle = DEFAULT_CHART_STYLE) -> None:
@@ -127,9 +183,36 @@ def draw_calibration_pair(ax, x_train: np.ndarray, y_true: np.ndarray, feature_i
     ax.legend(fontsize="small")
 
 
-def metrics_rows(y_true: np.ndarray, y_pred: np.ndarray, n_features: int = 1) -> list[tuple[str, float]]:
+def metrics_rows(y_true: np.ndarray, y_pred: np.ndarray, n_features: int = 1,
+                 loss_function: str = "mse",
+                 loss_function_link: str = "identity") -> list[tuple[str, float]]:
     """Single source of truth for the reported metrics, shared by the matplotlib
-    table, the GUI metrics widget and the saved training report."""
+    table, the GUI metrics widget and the saved training report.
+
+    The rows depend on the family: R² and MSE describe a least-squares fit with
+    normal errors, and reporting them for a Gamma-log GLM would dress up the
+    wrong model. A Gamma fit gets deviance-based measures instead, which are
+    what its own objective is built from. MAE and RMSE appear for both, since
+    they only measure distance on the scale of y.
+    """
+    if (loss_function, loss_function_link) == ("gamma", "log"):
+        deviance = gamma_deviance(y_true, y_pred)
+        n_samples = np.asarray(y_true).size
+        residual_df = n_samples - n_features - 1
+        rows = [
+            ("Mean Gamma NLL", gamma_log_nll(y_true, y_pred)),
+            ("Deviance", deviance),
+            ("Explained deviance (pseudo-R²)", gamma_explained_deviance(y_true, y_pred)),
+        ]
+        # dispersion only means something with residual degrees of freedom left
+        if residual_df > 0:
+            rows.append(("Deviance / df", deviance / residual_df))
+        rows += [
+            ("MAE", mean_absolute_error(y_true, y_pred)),
+            ("RMSE", float(np.sqrt(mean_squared_error(y_true, y_pred)))),
+        ]
+        return rows
+
     return [
         ("Loss (L1)", loss(y_true, y_pred)),
         ("Squared Loss (L2)", squared_loss(y_true, y_pred)),
@@ -141,8 +224,10 @@ def metrics_rows(y_true: np.ndarray, y_pred: np.ndarray, n_features: int = 1) ->
 
 
 def draw_metrics_table(ax, y_true: np.ndarray, y_pred: np.ndarray, n_features: int = 1,
-                       style: ChartStyle = DEFAULT_CHART_STYLE) -> None:
-    rows = metrics_rows(y_true, y_pred, n_features)
+                       style: ChartStyle = DEFAULT_CHART_STYLE,
+                       family: tuple[str, str] = FAMILY_GAUSSIAN) -> None:
+    rows = metrics_rows(y_true, y_pred, n_features,
+                        loss_function=family[0], loss_function_link=family[1])
 
     ax.axis("off")
     table = ax.table(
@@ -171,7 +256,8 @@ def build_charts_figure(fig, loss_history: list, y_true: np.ndarray, y_pred: np.
                         predict=None, label_name: str = "y",
                         calibration_index: int = 0,
                         calibration_baseline: np.ndarray | None = None,
-                        calibration_baseline_note: str = "others at mean"):
+                        calibration_baseline_note: str = "others at mean",
+                        family: tuple[str, str] = FAMILY_GAUSSIAN):
     """Populate `fig` with the requested charts, side by side. `charts` is a
     sequence of the CHART_* keys; drawing fewer of them keeps each one wide
     enough to read. Used by the GUI, where metrics live in a native table.
@@ -182,6 +268,10 @@ def build_charts_figure(fig, loss_history: list, y_true: np.ndarray, y_pred: np.
     predictor that chart plots against, and `calibration_baseline` pins the
     remaining predictors (defaulting to their training mean); the GUI exposes
     both as dropdowns.
+
+    `family` is the GLM family the run used. It decides which residual the
+    residuals chart shows and what the loss axis is called, so a chart never
+    describes a different model than the one that was fitted.
     """
     if charts is None:
         charts = [CHART_LOSS]
@@ -206,9 +296,9 @@ def build_charts_figure(fig, loss_history: list, y_true: np.ndarray, y_pred: np.
         axes = fig.subplots(1, len(charts), squeeze=False)[0]
         for ax, chart in zip(axes, charts):
             if chart == CHART_LOSS:
-                draw_loss_curve(ax, loss_history, style)
+                draw_loss_curve(ax, loss_history, style, family_loss_label(family))
             elif chart == CHART_RESIDUALS:
-                draw_residuals_plot(ax, y_true, y_pred, style)
+                draw_residuals_plot(ax, y_true, y_pred, style, family)
             elif chart == CHART_CALIBRATION:
                 draw_calibration_pair(ax, x_train, y_true, calibration_index,
                                       feature_names[calibration_index], predict,
@@ -222,25 +312,30 @@ def build_charts_figure(fig, loss_history: list, y_true: np.ndarray, y_pred: np.
 
 
 def build_dashboard_figure(fig, loss_history: list, y_true: np.ndarray, y_pred: np.ndarray,
-                           n_features: int = 1, style: ChartStyle = DEFAULT_CHART_STYLE):
+                           n_features: int = 1, style: ChartStyle = DEFAULT_CHART_STYLE,
+                           family: tuple[str, str] = FAMILY_GAUSSIAN):
     """Populate `fig` with the 2x2 training dashboard. `fig` can be a pyplot
     figure (standalone popup) or a bare matplotlib.figure.Figure (embedded in
-    a GUI canvas) - this function doesn't care which, it never calls show()."""
+    a GUI canvas) - this function doesn't care which, it never calls show().
+
+    `family` selects the residual type, the loss-axis name and the metric rows,
+    the same way it does for `build_charts_figure`."""
     with plt.rc_context({"font.family": style.font_family}):
         fig.patch.set_facecolor(style.figure_bg)
         (ax_loss, ax_residuals), (ax_pred_actual, ax_table) = fig.subplots(2, 2)
 
-        draw_loss_curve(ax_loss, loss_history, style)
-        draw_residuals_plot(ax_residuals, y_true, y_pred, style)
+        draw_loss_curve(ax_loss, loss_history, style, family_loss_label(family))
+        draw_residuals_plot(ax_residuals, y_true, y_pred, style, family)
         draw_predicted_vs_actual_plot(ax_pred_actual, y_true, y_pred, style)
-        draw_metrics_table(ax_table, y_true, y_pred, n_features, style)
+        draw_metrics_table(ax_table, y_true, y_pred, n_features, style, family)
 
         fig.tight_layout()
         return fig
 
 
 def plot_training_results(loss_history: list, y_true: np.ndarray, y_pred: np.ndarray,
-                          n_features: int = 1, style: ChartStyle = DEFAULT_CHART_STYLE) -> None:
+                          n_features: int = 1, style: ChartStyle = DEFAULT_CHART_STYLE,
+                          family: tuple[str, str] = FAMILY_GAUSSIAN) -> None:
     fig = plt.figure(figsize=(11, 8))
-    build_dashboard_figure(fig, loss_history, y_true, y_pred, n_features, style)
+    build_dashboard_figure(fig, loss_history, y_true, y_pred, n_features, style, family)
     plt.show()

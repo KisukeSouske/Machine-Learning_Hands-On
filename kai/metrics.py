@@ -122,7 +122,75 @@ def gamma_log_nll(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     y_true, y_pred = _as_arrays(y_true, y_pred)
     if np.any(y_pred <= 0):
         raise ValueError("Predicted values must be positive for the Gamma distribution.")
-    return np.sum(y_true / y_pred + np.log(y_pred))
+    # a MEAN, matching both the docstring and gamma_log_nll_derivation (which
+    # divides by n). Returning a sum here would report a curve n times the
+    # objective the gradient actually descends, and would not be comparable
+    # with the mean_squared_error curve of the other family.
+    return float(np.mean(y_true / y_pred + np.log(y_pred)))
+
+def gamma_deviance(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Total Gamma deviance: 2 * sum(-log(y/mu) + (y - mu)/mu).
+
+    The GLM analogue of the residual sum of squares - twice the log-likelihood
+    gap between this fit and a saturated model that reproduces every point.
+    Zero for a perfect fit, larger is worse.
+
+    Raises:
+    ValueError: If any y or any prediction is non-positive, where the Gamma
+        log-likelihood is undefined.
+    """
+    y_true, y_pred = _as_arrays(y_true, y_pred)
+    if np.any(y_pred <= 0):
+        raise ValueError("Predicted values must be positive for the Gamma distribution.")
+    if np.any(y_true <= 0):
+        raise ValueError("True values must be positive for the Gamma distribution.")
+    return float(2.0 * np.sum(-np.log(y_true / y_pred) + (y_true - y_pred) / y_pred))
+
+
+def gamma_deviance_residuals(y_true: np.ndarray, y_pred: np.ndarray) -> np.ndarray:
+    """Signed deviance residuals: sign(y - mu) * sqrt(unit deviance).
+
+    Their squares sum to `gamma_deviance`, exactly as raw residuals square to
+    the residual sum of squares. This is the residual to plot for a Gamma fit:
+    the raw residual y - mu has a spread proportional to mu, so a raw residual
+    plot always shows a funnel and can never tell a real problem from the
+    model working as designed.
+
+    Raises:
+    ValueError: If any y or any prediction is non-positive, where the unit
+        deviance is undefined.
+    """
+    y_true, y_pred = _as_arrays(y_true, y_pred)
+    if np.any(y_pred <= 0):
+        raise ValueError("Predicted values must be positive for the Gamma distribution.")
+    if np.any(y_true <= 0):
+        raise ValueError("True values must be positive for the Gamma distribution.")
+    unit_deviance = 2.0 * (-np.log(y_true / y_pred) + (y_true - y_pred) / y_pred)
+    # -log(t) + t - 1 is non-negative for every t > 0, so a negative value here
+    # is float noise around an exact zero (y == mu); clip before the sqrt
+    unit_deviance = np.maximum(unit_deviance, 0.0)
+    return np.sign(y_true - y_pred) * np.sqrt(unit_deviance)
+
+
+def gamma_explained_deviance(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Fraction of the null deviance explained: 1 - D(model)/D(intercept only).
+
+    The GLM counterpart of R², built from deviance instead of squared error.
+    It is NOT McFadden's pseudo-R²: that one needs the full log-likelihood
+    including the dispersion parameter, which this estimator never fits.
+
+    Raises:
+    ValueError: If the null deviance is zero, i.e. y is constant and there is
+        nothing for a model to explain.
+    """
+    y_true, y_pred = _as_arrays(y_true, y_pred)
+    null_deviance = gamma_deviance(y_true, np.full_like(y_true, float(np.mean(y_true))))
+    if null_deviance == 0:
+        raise ValueError(
+            "Explained deviance is undefined when y_true is constant (null deviance = 0)."
+        )
+    return 1.0 - gamma_deviance(y_true, y_pred) / null_deviance
+
 
 def gamma_log_nll_derivation(y_true: np.ndarray, y_pred: np.ndarray, x_true: np.ndarray) -> tuple[np.ndarray, float]:
     """
@@ -143,8 +211,12 @@ def gamma_log_nll_derivation(y_true: np.ndarray, y_pred: np.ndarray, x_true: np.
     if x_true.shape[0] != y_true.shape[0]:
         raise ValueError("x_true must have the same number of samples as y_true.")
 
+    # d/d(eta) of [y/mu + log mu] with mu = exp(eta) is (mu - y)/mu, so the
+    # chain rule gives x * error for the weights and error for the bias. Both
+    # carry the SAME sign: the descent step subtracts this gradient, exactly
+    # as it does for mean_squared_error_derivation.
     error = (y_pred - y_true) / y_pred
-    weight_derivation = -(x_true.T @ error) / y_true.size
+    weight_derivation = (x_true.T @ error) / y_true.size
     bias_derivation = float(np.sum(error) / y_true.size)
     return weight_derivation, bias_derivation
 

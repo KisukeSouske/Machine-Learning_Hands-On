@@ -20,7 +20,16 @@ from dataclasses import dataclass
 import numpy as np
 from scipy import stats as scipy_stats
 
-from kai.metrics import mean_squared_error, mean_squared_error_derivation, r_squared, squared_loss
+from kai.metrics import (
+    GAMMA_ETA_CLIP,
+    gamma_log_inverse_link,
+    gamma_log_nll,
+    gamma_log_nll_derivation,
+    mean_squared_error,
+    mean_squared_error_derivation,
+    r_squared,
+    squared_loss,
+)
 
 from collections.abc import Callable
 
@@ -41,22 +50,45 @@ class LinearFit:
     weights: np.ndarray
     bias: float
     loss_history: tuple[float, ...] | None = None
+    loss_function: str = "mse"
+    loss_function_link: str = "identity"
 
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        """Predictions for X, in the same feature space the fit was made in."""
+    def linear_predictor(self, X: np.ndarray) -> np.ndarray:
+        """The linear part, eta = bias + X @ weights, BEFORE any inverse link.
+
+        This is the scale the coefficients are additive on. For the default
+        identity link it is also the prediction; for a log link it is not.
+        """
         X = np.asarray(X, dtype=float)
         # mirror _as_design_inputs's promotion, so a 1-D X round-trips through
         # fit_ols(x, y).predict(x) the same way it went in
         if X.ndim == 1 and self.weights.shape[0] == 1:
             X = X.reshape(-1, 1)
         return self.bias + X @ self.weights
-    
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Predictions for X, on the scale of y.
+
+        The inverse link of the family this was fitted with is applied here,
+        so a Gamma-log fit returns mu = exp(eta) rather than eta. Without it
+        every consumer would silently read the linear predictor as if it were
+        a prediction, which for a log link is off by an exponential.
+        """
+        eta = self.linear_predictor(X)
+        return _FAMILIES[(self.loss_function, self.loss_function_link)].inverse_link(eta)
+
+
 @dataclass(frozen=True)
 class _Family:
     inverse_link: Callable[[np.ndarray], np.ndarray]
     loss: Callable[[np.ndarray, np.ndarray], float]
     gradient: Callable[..., tuple[np.ndarray, float]]
     init_bias: Callable[[np.ndarray], float]
+    # Optional check for "the linear predictor has left the range this family
+    # can represent". A clipped inverse link keeps the loss finite no matter
+    # how far the parameters run away, which silently defeats the usual
+    # `not isfinite(loss)` divergence guard.
+    saturated: Callable[[np.ndarray], bool] | None = None
 
 
 _FAMILIES = {
@@ -64,13 +96,17 @@ _FAMILIES = {
         inverse_link=lambda eta: eta,
         loss=mean_squared_error,
         gradient=mean_squared_error_derivation,
-        init_bias=lambda y: 0.0,
+        init_bias=lambda y: np.mean(y),
     ),
     ('gamma', 'log'): _Family(
         inverse_link=gamma_log_inverse_link,
         loss=gamma_log_nll,
         gradient=gamma_log_nll_derivation,
         init_bias=lambda y: float(np.log(np.mean(y))),
+        # Once eta is clipped, mu no longer depends on the parameters, so the
+        # reported loss and the gradient stop describing the model being fitted
+        # - the run is no longer optimising anything and cannot recover.
+        saturated=lambda eta: bool(np.any(np.abs(eta) >= GAMMA_ETA_CLIP)),
     ),
 }
 
@@ -204,6 +240,7 @@ def fit_gradient_descent(
     random_state: int | None = None,
     cancel_event: threading.Event | None = None,
     loss_function: str = 'mse',
+    loss_function_link: str = 'identity',
 ) -> LinearFit:
     """Fit y ~ X by mini-batch gradient descent.
 
@@ -237,8 +274,20 @@ def fit_gradient_descent(
     """
     X, y = _as_design_inputs(X, y)
     n_samples, n_features = X.shape
+    try:
+        family = _FAMILIES[(loss_function, loss_function_link)]
+    except KeyError:
+        raise ValueError(
+            f"Unsupported combination: loss_function={loss_function!r}, "
+            f"loss_function_link={loss_function_link!r}. "
+            f"Available: {sorted(_FAMILIES)}"
+        ) from None
+
+    if loss_function == 'gamma' and np.any(y <= 0):
+        raise ValueError("The Gamma family requires strictly positive y values.")
+
     weights = np.zeros(n_features)
-    bias = 0.0
+    bias = family.init_bias(y)
     loss_history: list[float] = []
     rng = np.random.default_rng(random_state)
 
@@ -246,7 +295,8 @@ def fit_gradient_descent(
     # parameters (before any update). Taking it after the first epoch would be
     # self-defeating: a run that converges immediately would compare its
     # already-tiny gradient against itself and never satisfy the threshold.
-    initial_gradient_norm = gradient_norm(y, bias + X @ weights, X) or 1.0
+    initial_gradient_norm = gradient_norm(
+        y, family.inverse_link(bias + X @ weights), X, family.gradient) or 1.0
 
     for epoch in range(epochs):
         if cancel_event is not None and cancel_event.is_set():
@@ -255,19 +305,26 @@ def fit_gradient_descent(
         for start in range(0, n_samples, batch_size):
             batch = indices[start:start + batch_size]
             x_batch, y_batch = X[batch], y[batch]
-            weight_slope, bias_slope = mean_squared_error_derivation(
-                y_batch, bias + x_batch @ weights, x_batch
-            )
+            mu_batch = family.inverse_link(bias + x_batch @ weights)
+            weight_slope, bias_slope = family.gradient(y_batch, mu_batch, x_batch)
             weights -= learning_rate * weight_slope
             bias -= learning_rate * bias_slope
 
-        y_pred = bias + X @ weights
-        epoch_loss = mean_squared_error(y, y_pred)
+        eta = bias + X @ weights
+        y_pred = family.inverse_link(eta)
+        epoch_loss = family.loss(y, y_pred)
         if not np.isfinite(epoch_loss):
             raise ValueError(
                 f"Training diverged at epoch {epoch}: loss became {epoch_loss}. "
                 f"Try a smaller learning_rate (current={learning_rate}) or "
                 f"standardize the features first."
+            )
+        if family.saturated is not None and family.saturated(eta):
+            raise ValueError(
+                f"Training diverged at epoch {epoch}: the linear predictor "
+                f"saturated the link's safe range, so the loss stopped "
+                f"tracking the parameters. Try a smaller learning_rate "
+                f"(current={learning_rate}) or standardize the features first."
             )
         loss_history.append(epoch_loss)
 
@@ -275,15 +332,26 @@ def fit_gradient_descent(
         # FRACTION of where it started. A flat loss delta is not enough on its
         # own: in an ill-conditioned problem the loss can stall while the
         # parameters are still far from the optimum.
-        if gradient_norm(y, y_pred, X) <= tolerance * initial_gradient_norm:
+        if gradient_norm(y, y_pred, X, family.gradient) <= tolerance * initial_gradient_norm:
             break
 
-    return LinearFit(weights=weights, bias=float(bias), loss_history=tuple(loss_history))
+    return LinearFit(weights=weights, bias=float(bias), loss_history=tuple(loss_history),
+                     loss_function=loss_function, loss_function_link=loss_function_link)
 
 
-def gradient_norm(y_true: np.ndarray, y_pred: np.ndarray, X: np.ndarray) -> float:
-    """Euclidean norm of the full MSE gradient (weights and bias together)."""
-    weight_slope, bias_slope = mean_squared_error_derivation(y_true, y_pred, X)
+def gradient_norm(y_true: np.ndarray, y_pred: np.ndarray, X: np.ndarray,
+                  gradient=None) -> float:
+    """Euclidean norm of the full gradient (weights and bias together).
+
+    `gradient` selects which objective's gradient to measure, defaulting to
+    MSE. The convergence test has to measure the objective actually being
+    optimised: for a Gamma run the MSE gradient is a different function with
+    different zeros, so stopping on it would stop at the wrong place (or,
+    since it is generally larger, not stop at all).
+    """
+    if gradient is None:
+        gradient = mean_squared_error_derivation
+    weight_slope, bias_slope = gradient(y_true, y_pred, X)
     return float(np.sqrt(np.sum(weight_slope ** 2) + bias_slope ** 2))
 
 def variance_inflation_factors(features: dict) -> dict:
@@ -484,6 +552,22 @@ class PredictionInterval:
     confidence_level: float
 
 
+def _require_gaussian_identity(fit: LinearFit, what: str) -> None:
+    """Reject a fit from a family this normal-theory formula does not cover.
+
+    The standard errors, t/F statistics and interval formulas all assume
+    homoscedastic normal errors on the scale of y. A Gamma-log fit violates
+    both assumptions, so the numbers would come out looking perfectly
+    reasonable and mean nothing - refusing is the only honest answer.
+    """
+    if (fit.loss_function, fit.loss_function_link) != ("mse", "identity"):
+        raise ValueError(
+            f"{what} assumes normal errors and an identity link, but this fit "
+            f"used loss_function={fit.loss_function!r} with "
+            f"loss_function_link={fit.loss_function_link!r}."
+        )
+
+
 def predict_with_intervals(
     X, y_true, fit: LinearFit, x0, confidence_level: float = 0.95
 ) -> PredictionInterval:
@@ -505,6 +589,7 @@ def predict_with_intervals(
         there are too few samples for the residual degrees of freedom to be
         positive.
     """
+    _require_gaussian_identity(fit, "predict_with_intervals")
     X, y_true = _as_design_inputs(X, y_true)
     x0 = np.asarray(x0, dtype=float).reshape(-1)
     n_features = X.shape[1]
@@ -559,6 +644,7 @@ def summarize_inference(X, y_true, fit: LinearFit, feature_names: list[str] | No
     feature_names (list[str] | None): Labels for the columns of X, in order.
         Defaults to "x1", "x2", ... if not given.
     """
+    _require_gaussian_identity(fit, "summarize_inference")
     X, y_true = _as_design_inputs(X, y_true)
     y_pred = fit.predict(X)
     n_features = X.shape[1]

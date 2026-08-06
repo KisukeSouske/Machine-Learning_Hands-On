@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 
 from kai.preprocessing import standardize
-from kai.regression import fit_gradient_descent, fit_ols
+from kai.regression import _FAMILIES, fit_gradient_descent, fit_ols
 
 
 @dataclass(frozen=True)
@@ -58,6 +58,8 @@ class Model:
         bias: float,
         feature_mean: np.ndarray | None = None,
         feature_std: np.ndarray | None = None,
+        loss_function: str = "mse",
+        loss_function_link: str = "identity",
     ):
         """Callers rarely build a Model directly; use the classmethods below."""
         self.csv_file = csv_file
@@ -69,6 +71,8 @@ class Model:
         self._bias = float(bias)
         self._feature_mean = None if feature_mean is None else np.asarray(feature_mean, dtype=float)
         self._feature_std = None if feature_std is None else np.asarray(feature_std, dtype=float)
+        self._loss_function = loss_function
+        self._loss_function_link = loss_function_link
 
     # ------------------------------------------------------------------ #
     # Read-only accessors
@@ -104,8 +108,26 @@ class Model:
     # ------------------------------------------------------------------ #
     # Prediction (shared by both training methods)
     # ------------------------------------------------------------------ #
+    @property
+    def loss_function(self) -> str:
+        return self._loss_function
+
+    @property
+    def loss_function_link(self) -> str:
+        return self._loss_function_link
+
     def predict(self, x: np.ndarray) -> np.ndarray:
-        """Predict from RAW feature values, reapplying any training scaling."""
+        """Predict from RAW feature values, reapplying any training scaling.
+
+        The result is on the scale of y: the family's inverse link is applied,
+        so a Gamma-log model returns mu, not the linear predictor.
+        """
+        eta = self.linear_predictor(x)
+        return _FAMILIES[(self._loss_function, self._loss_function_link)].inverse_link(eta)
+
+    def linear_predictor(self, x: np.ndarray) -> np.ndarray:
+        """The linear part eta, from RAW feature values, before the inverse
+        link. Equal to predict() only for the default identity link."""
         x = np.asarray(x, dtype=float)
         if self._feature_mean is not None:
             x = (x - self._feature_mean) / self._feature_std
@@ -147,6 +169,8 @@ class Model:
         random_state: int | None = None,
         sep: str | None = None,
         cancel_event: threading.Event | None = None,
+        loss_function: str = "mse",
+        loss_function_link: str = "identity",
     ) -> TrainedModel:
         """Fit by mini-batch gradient descent.
 
@@ -154,6 +178,11 @@ class Model:
         TrainedModel carries the per-epoch loss history for plotting. `sep`
         is forwarded to pandas (None = sniff); `cancel_event` is forwarded to
         allow stopping the run early (raises `TrainingCancelled`).
+
+        `loss_function`/`loss_function_link` select the GLM family (e.g.
+        "gamma"/"log"). The family is stored on the returned Model so that its
+        predict() applies the matching inverse link - a fit made here and a
+        prediction made later must not disagree about what scale they are on.
         """
         x_raw, y = cls.load_columns(csv_file, label_column, features, sep=sep)
 
@@ -170,12 +199,15 @@ class Model:
             tolerance=tolerance,
             random_state=random_state,
             cancel_event=cancel_event,
+            loss_function=loss_function,
+            loss_function_link=loss_function_link,
         )
         model = cls(
             csv_file=csv_file, label_column=label_column, features=features,
             x_train=x_raw, y_train=y,
             weights=fit.weights, bias=fit.bias,
             feature_mean=feature_mean, feature_std=feature_std,
+            loss_function=loss_function, loss_function_link=loss_function_link,
         )
         return TrainedModel(model=model, method="gd", loss_history=fit.loss_history)
 

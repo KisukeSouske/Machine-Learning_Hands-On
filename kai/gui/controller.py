@@ -16,8 +16,15 @@ from typing import Callable
 import numpy as np
 
 from kai.gui.helpers import format_elapsed
-from kai.gui.state import TrainingRequest, TrainingResult
+from kai.gui.state import (
+    TrainingRequest,
+    TrainingResult,
+    coefficients_in_original_space,
+    intercept_in_original_space,
+)
 from kai.model import Model, TrainedModel
+from kai.visualization import family_label as _family_label
+from kai.visualization import family_loss_label as _loss_label
 from kai.visualization import metrics_rows
 
 
@@ -98,6 +105,8 @@ def _fit_by_method(
             random_state=hp.random_state,
             sep=request.separator,
             cancel_event=cancel_event,
+            loss_function=hp.loss_function,
+            loss_function_link=hp.loss_function_link,
         )
     if request.method == "ols":
         return Model.fit_ols(
@@ -108,12 +117,32 @@ def _fit_by_method(
 
 
 def _format_equation(result: TrainingResult) -> str:
+    # original-units coefficients, so the printed equation can be evaluated on
+    # raw feature values and matches the Predictors tab. Printing the stored
+    # weights would describe a z-scored input space the reader does not have.
+    coefficients = coefficients_in_original_space(result)
+    intercept = intercept_in_original_space(result)
     terms = " + ".join(
         f"{float(w):.6f} * {feature}"
-        for w, feature in zip(result.weights, result.request.features)
+        for w, feature in zip(coefficients, result.request.features)
     )
-    sign = "+" if result.bias >= 0 else "-"
-    return f"{result.request.label_column} = {terms} {sign} {abs(result.bias):.6f}"
+    sign = "+" if intercept >= 0 else "-"
+    linear = f"{terms} {sign} {abs(intercept):.6f}"
+    label = result.request.label_column
+    # under a log link the linear part is log(mu), not the response itself;
+    # printing "y = ..." would state a model that was never fitted
+    if _family_of(result) == ("gamma", "log"):
+        return f"{label} = exp({linear})"
+    return f"{label} = {linear}"
+
+
+def _family_of(result: TrainingResult) -> tuple[str, str]:
+    """The GLM family of a run. Closed-form OLS is always normal/identity;
+    only gradient descent carries a configurable family."""
+    if result.request.method != "gd":
+        return ("mse", "identity")
+    hp = result.request.hyperparameters
+    return (hp.loss_function, hp.loss_function_link)
 
 
 def build_results_report(result: TrainingResult) -> str:
@@ -148,11 +177,12 @@ def build_results_report(result: TrainingResult) -> str:
             f"  stop tolerance  : {hp.tolerance} (relative: ||grad|| <= tol * ||grad_initial||)",
             f"  standardization : {'enabled (z-score)' if hp.standardize_features else 'disabled'}",
             f"  random state    : {hp.random_state if hp.random_state is not None else 'unseeded (not reproducible)'}",
+            f"  family          : {_family_label(_family_of(result))}",
             "",
             "Training",
             f"  epochs run      : {result.epochs_run}",
             f"  elapsed time    : {format_elapsed(result.elapsed_seconds)} (mm:ss:cc)",
-            f"  final MSE       : {result.final_loss:.6f}",
+            f"  final {_loss_label(_family_of(result)):<10}: {result.final_loss:.6f}",
         ]
         if hp.standardize_features:
             model_note = "  (weights are in standardized feature space; predict() re-applies the scaling)"
@@ -170,8 +200,10 @@ def build_results_report(result: TrainingResult) -> str:
     if model_note:
         lines.append(model_note)
     lines += ["", "Metrics (in-sample)"]
-    for name, value in metrics_rows(result.y_true, result.y_pred, len(request.features)):
-        lines.append(f"  {name:<18}: {value:.6f}")
+    family = _family_of(result)
+    for name, value in metrics_rows(result.y_true, result.y_pred, len(request.features),
+                                    loss_function=family[0], loss_function_link=family[1]):
+        lines.append(f"  {name:<30}: {value:.6f}")
     lines += [
         "",
         "  Note: computed on the training data itself - no train/test split - so they",

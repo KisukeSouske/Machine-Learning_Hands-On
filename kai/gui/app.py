@@ -22,7 +22,14 @@ from kai.gui.helpers import (
     list_csv_files,
     read_csv_preview,
 )
-from kai.gui.state import Hyperparameters, TrainingRequest, TrainingResult
+from kai.gui.state import (
+    Hyperparameters,
+    TrainingRequest,
+    TrainingResult,
+    coefficients_in_original_space,
+    intercept_in_original_space,
+    training_scaling,
+)
 from kai.gui.widgets import (
     ChartTabBar,
     HelpHint,
@@ -50,7 +57,11 @@ from kai.visualization import (
     CHART_LOSS,
     CHART_PREDICTED_VS_ACTUAL,
     CHART_RESIDUALS,
+    FAMILY_GAMMA_LOG,
+    FAMILY_GAUSSIAN,
+    FAMILY_LABELS,
     build_charts_figure,
+    family_label,
     metrics_rows,
 )
 
@@ -165,6 +176,16 @@ HELP_PREDICTORS = (
     "you compare when predictors are measured on different scales: a small "
     "coefficient on a wide-ranging variable can matter more than a large one "
     "on a narrow variable. 'VIF' flags collinearity with the other predictors."
+)
+HELP_FAMILY = (
+    "The distribution and link the gradient-descent engine fits. "
+    "Normal/identity is ordinary least squares: the response can come out "
+    "negative, and the errors are assumed to have constant spread. "
+    "Gamma/log models a strictly positive response whose spread grows with "
+    "its mean - it predicts exp(linear part), so it can never return a "
+    "negative value, and its coefficients act multiplicatively. Only "
+    "gradient descent supports a family; the closed-form OLS solver is "
+    "normal/identity by construction."
 )
 HELP_INTERVALS = (
     "95% confidence interval: uncertainty about the MEAN response at this "
@@ -621,6 +642,16 @@ class TrainingApp(tk.Tk):
     def _selected_charts(self) -> list[str]:
         return self.chart_tabs.get_active()
 
+    @staticmethod
+    def _result_family(result: TrainingResult) -> tuple[str, str]:
+        """The family a finished run actually used. Read from the result, not
+        from the dropdown: the user may have changed the dropdown since, and
+        the displayed metrics must describe the model on screen."""
+        if result.request.method != "gd":
+            return FAMILY_GAUSSIAN
+        hp = result.request.hyperparameters
+        return (hp.loss_function, hp.loss_function_link)
+
     def _rebuild_calibration_choices(self, feature_names: tuple[str, ...]) -> None:
         """Point the calibration dropdown at the features of the last run,
         keeping the current pick when it survived the new selection."""
@@ -688,6 +719,7 @@ class TrainingApp(tk.Tk):
             calibration_index=calibration_index,
             calibration_baseline=baseline,
             calibration_baseline_note=baseline_note,
+            family=self._result_family(result),
         )
         self.canvas.draw()
         # reset the zoom/pan history so the toolbar's "home" matches the new axes
@@ -940,6 +972,23 @@ class TrainingApp(tk.Tk):
         # collect them so _on_method_changed can enable/disable in one loop.
         self._gd_only_widgets: list[tk.Widget] = []
 
+        # --- GLM family. Only gradient descent can fit one: the closed-form
+        # OLS path solves the normal equations, which is normal/identity by
+        # construction, so this is disabled alongside the other GD controls.
+        self._label_with_hint(body, "GLM family", HELP_FAMILY).pack(anchor="w")
+        self.family_var = tk.StringVar(value=FAMILY_LABELS[FAMILY_GAUSSIAN])
+        self.family_combo = ttk.Combobox(
+            body, textvariable=self.family_var, state="readonly",
+            values=[FAMILY_LABELS[FAMILY_GAUSSIAN], FAMILY_LABELS[FAMILY_GAMMA_LOG]],
+        )
+        self.family_combo.pack(anchor="w", fill="x", pady=(2, 2))
+        self.family_combo.bind("<<ComboboxSelected>>",
+                               lambda _event: self._on_family_changed())
+        self._gd_only_widgets.append(self.family_combo)
+        self.family_note_var = tk.StringVar(value="")
+        ttk.Label(body, textvariable=self.family_note_var, style="Small.TLabel",
+                  justify="left", wraplength=CONFIG_PANEL_WIDTH - 24).pack(anchor="w", pady=(0, 6))
+
         self.learning_rate_var = tk.StringVar(value=str(RAW_LEARNING_RATE))
         self.epochs_var = tk.StringVar(value="10000")
         self.batch_size_var = tk.StringVar(value="100")
@@ -1047,7 +1096,28 @@ class TrainingApp(tk.Tk):
                 widget.configure(state="normal" if is_gd else "disabled")
             except tk.TclError:
                 pass
+        # readonly, not normal: this is a fixed list of families, not free text
+        if is_gd:
+            self.family_combo.configure(state="readonly")
+        self._on_family_changed(log=False)
         self.log(f"Estimation method: {'gradient descent' if is_gd else 'ordinary least squares'}")
+
+    def _on_family_changed(self, log: bool = True) -> None:
+        """Explain what the current family changes, and keep the note honest
+        about OLS ignoring it."""
+        family = self._selected_family()
+        if self.method_var.get() != "gd":
+            self.family_note_var.set("OLS always fits normal / identity.")
+            return
+        if family == FAMILY_GAMMA_LOG:
+            self.family_note_var.set(
+                "Requires a strictly positive target. Predictions are exp(...), "
+                "so they are always positive; metrics switch to deviance-based ones."
+            )
+        else:
+            self.family_note_var.set("Least squares: predictions may be negative.")
+        if log:
+            self.log(f"GLM family: {family_label(family)}")
 
     def log(self, message: str) -> None:
         self.logs_text.configure(state="normal")
@@ -1058,7 +1128,15 @@ class TrainingApp(tk.Tk):
     # ------------------------------------------------------------------ #
     # Training
     # ------------------------------------------------------------------ #
+    def _selected_family(self) -> tuple[str, str]:
+        """The family picked in the dropdown, as a (loss_function, link) key."""
+        for family, label in FAMILY_LABELS.items():
+            if self.family_var.get() == label:
+                return family
+        return FAMILY_GAUSSIAN
+
     def _parse_hyperparameters(self) -> Hyperparameters | None:
+        family = self._selected_family()
         try:
             return Hyperparameters(
                 learning_rate=float(self.learning_rate_var.get()),
@@ -1066,6 +1144,8 @@ class TrainingApp(tk.Tk):
                 epochs=int(float(self.epochs_var.get())),
                 tolerance=float(self.tolerance_var.get()),
                 standardize_features=bool(self.standardize_var.get()),
+                loss_function=family[0],
+                loss_function_link=family[1],
             )
         except ValueError:
             messagebox.showerror("Invalid hyperparameters", "Check the values in the Config tab.")
@@ -1164,7 +1244,10 @@ class TrainingApp(tk.Tk):
         self._last_model = self._rebuild_predict_only_model(result)
         self.save_button.configure(state="normal")
 
-        rows = metrics_rows(result.y_true, result.y_pred, n_features=len(result.request.features))
+        family = self._result_family(result)
+        rows = metrics_rows(result.y_true, result.y_pred,
+                            n_features=len(result.request.features),
+                            loss_function=family[0], loss_function_link=family[1])
         self.metrics_tree.delete(*self.metrics_tree.get_children())
         for name, value in rows:
             self.metrics_tree.insert("", tk.END, values=(name, f"{value:.5f}"))
@@ -1197,7 +1280,7 @@ class TrainingApp(tk.Tk):
         never does. We recover it from `result.x_train` (raw features) so
         predict() reapplies the same transform.
         """
-        scaling = _training_scaling(result)
+        scaling = training_scaling(result)
         feature_mean, feature_std = scaling if scaling is not None else (None, None)
         return Model(
             csv_file=result.request.csv_path,
@@ -1280,30 +1363,44 @@ class TrainingApp(tk.Tk):
         """
         feature_names = list(result.request.features)
         x_raw = np.asarray(result.x_train, dtype=float)
-        coefficients = _coefficients_in_original_space(result)
+        coefficients = coefficients_in_original_space(result)
         spreads = x_raw.std(axis=0) if x_raw.size else np.ones(len(feature_names))
 
         standardized = (result.request.method == "gd"
                         and result.request.hyperparameters.standardize_features)
-        self.predictors_note_var.set(
-            "Coefficients converted back to original units."
-            if standardized else "Coefficients in original units."
-        )
+        units_note = ("converted back to original units" if standardized
+                      else "in original units")
+
+        # Under a log link the coefficients are additive on log(y), which means
+        # multiplicative on y. Reporting a one-SD change as a FACTOR keeps the
+        # column both scale-comparable and readable in the way the model works.
+        is_log_link = self._result_family(result) == FAMILY_GAMMA_LOG
+        if is_log_link:
+            self.predictors_tree.heading("coef", text="Coef (log)")
+            self.predictors_tree.heading("std_coef", text="x per SD")
+            self.predictors_note_var.set(
+                f"Log link: coefficients {units_note}, additive on log({result.request.label_column})."
+            )
+        else:
+            self.predictors_tree.heading("coef", text="Coefficient")
+            self.predictors_tree.heading("std_coef", text="Std. coef")
+            self.predictors_note_var.set(f"Coefficients {units_note}.")
 
         for index, name in enumerate(feature_names):
             coefficient = float(coefficients[index])
+            per_spread = coefficient * float(spreads[index])
             vif_value = vifs.get(name) if vifs else None
             self.predictors_tree.insert(
                 "", tk.END,
                 values=(name, f"{coefficient:.5f}",
-                        f"{coefficient * float(spreads[index]):.5f}",
+                        f"{np.exp(per_spread):.5f}" if is_log_link else f"{per_spread:.5f}",
                         "-" if vif_value is None else f"{vif_value:.3f}"),
             )
         # the intercept completes the fitted equation but is not a predictor:
         # it has no spread to scale by and nothing to be collinear with
         self.predictors_tree.insert(
             "", tk.END,
-            values=("(intercept)", f"{_intercept_in_original_space(result):.5f}", "-", "-"),
+            values=("(intercept)", f"{intercept_in_original_space(result):.5f}", "-", "-"),
         )
 
     # ------------------------------------------------------------------ #
@@ -1340,57 +1437,6 @@ def _predict_with_ols_summary(summary: InferenceSummary, X: np.ndarray) -> np.nd
     intercept = summary.coefficients[0]
     weights = summary.coefficients[1:]
     return intercept + np.asarray(X, dtype=float) @ weights
-
-
-def _training_scaling(result: TrainingResult):
-    """The (mean, std) a run standardized with, or None if it trained on raw
-    features.
-
-    Single source of truth for what space `result.weights` live in: predict(),
-    the Predictors tab and anything else reporting coefficients must agree, or
-    they silently disagree by a factor of the feature's spread.
-    """
-    x_raw = np.asarray(result.x_train, dtype=float)
-    standardized = (
-        result.request.method == "gd"
-        and result.request.hyperparameters.standardize_features
-        and x_raw.size
-    )
-    if not standardized:
-        return None
-    spread = x_raw.std(axis=0)
-    # matches the standardize() helper's guard for constant columns
-    return x_raw.mean(axis=0), np.where(spread == 0, 1.0, spread)
-
-
-def _coefficients_in_original_space(result: TrainingResult) -> np.ndarray:
-    """Feature coefficients expressed per one RAW unit of each predictor.
-
-    A standardized run stores weights per standard deviation; dividing by the
-    spread converts them back, so the reported number always answers the same
-    question regardless of how the model was trained.
-    """
-    weights = np.asarray(result.weights, dtype=float)
-    scaling = _training_scaling(result)
-    if scaling is None:
-        return weights
-    _mean, spread = scaling
-    return weights / spread
-
-
-def _intercept_in_original_space(result: TrainingResult) -> float:
-    """The intercept of the same original-units equation.
-
-    Undoing the centering moves part of each feature's effect into the
-    constant term, so this is not simply `result.bias` for a standardized run.
-    """
-    weights = np.asarray(result.weights, dtype=float)
-    bias = float(result.bias)
-    scaling = _training_scaling(result)
-    if scaling is None:
-        return bias
-    mean, spread = scaling
-    return bias - float(np.sum(weights * mean / spread))
 
 
 if __name__ == "__main__":

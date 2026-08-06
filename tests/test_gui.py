@@ -168,7 +168,8 @@ def test_format_prediction_stays_within_the_readout_budget():
 # Test cases for the Predictors tab's coefficient conversion
 import numpy as np
 
-from kai.gui.app import _coefficients_in_original_space, _intercept_in_original_space
+from kai.gui.state import coefficients_in_original_space as _coefficients_in_original_space
+from kai.gui.state import intercept_in_original_space as _intercept_in_original_space
 from kai.gui.state import Hyperparameters, TrainingRequest, TrainingResult
 
 
