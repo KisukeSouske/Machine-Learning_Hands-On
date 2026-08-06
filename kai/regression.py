@@ -513,6 +513,11 @@ def p_values(t_stats: np.ndarray, degrees_of_freedom: int) -> np.ndarray:
     t_stats = np.asarray(t_stats, dtype=float)
     return 2.0 * scipy_stats.t.sf(np.abs(t_stats), df=degrees_of_freedom)
 
+def sigmoid_function(x: np.ndarray) -> np.ndarray:
+    """Sigmoid function, 1 / (1 + exp(-x)), applied elementwise."""
+    x = np.asarray(x, dtype=float)
+    return 1.0 / (1.0 + np.exp(-x))
+
 
 @dataclass(frozen=True)
 class InferenceSummary:

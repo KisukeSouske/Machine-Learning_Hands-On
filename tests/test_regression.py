@@ -17,6 +17,7 @@ from kai.regression import (
     gradient_norm,
     solve_linear_system,
     variance_inflation_factors,
+    sigmoid_function
 )
 
 
@@ -224,3 +225,9 @@ def test_gradient_norm_is_zero_at_the_optimum():
     y = X @ np.array([1.0, 2.0]) + 5.0
     fit = fit_ols(X, y)
     assert gradient_norm(y, fit.predict(X), X) == pytest.approx(0.0, abs=1e-9)
+
+def test_sigmoid_function_returns_values_between_0_and_1():
+    x = np.array([-1000, -1, 0, 1, 1000])
+    result = sigmoid_function(x)
+    assert np.all(result >= 0) and np.all(result <= 1)
+    assert result[2] == pytest.approx(0.5)  # sigmoid(0) should be 0.5

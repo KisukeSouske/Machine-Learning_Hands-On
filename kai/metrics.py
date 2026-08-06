@@ -71,6 +71,32 @@ def mean_squared_error(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     y_true, y_pred = _as_arrays(y_true, y_pred)
     return squared_loss(y_true, y_pred) / y_true.size
 
+def log_loss(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    # Logarithmic loss (cross-entropy): evaluates the performance of probabilistic classifiers, penalizing confident but incorrect predictions more heavily.
+    """
+    Calculate the Logarithmic Loss (Log Loss) between true and predicted values.
+
+    Parameters:
+    y_true (np.ndarray): True binary labels (0 or 1).
+    y_pred (np.ndarray): Predicted probabilities for the positive class.
+
+    Returns:
+    float: The log loss value.
+
+    Raises:
+    ValueError: If y_true contains values other than 0 or 1, or if y_pred contains values outside [0, 1].
+    """
+    y_true, y_pred = _as_arrays(y_true, y_pred)
+    if not np.all(np.isin(y_true, [0, 1])):
+        raise ValueError("y_true must contain only binary values (0 or 1).")
+    if np.any((y_pred < 0) | (y_pred > 1)):
+        raise ValueError("y_pred must be probabilities in the range [0, 1].")
+    
+    epsilon = 1e-15
+    y_pred = np.clip(y_pred, epsilon, 1 - epsilon)
+    
+    return -np.mean(y_true * np.log(y_pred) + (1 - y_true) * np.log(1 - y_pred))
+
 # Mean Squared Error derivative: the gradient of the MSE with respect to the model parameters, used to update weights and bias during gradient descent.
 def mean_squared_error_derivation(y_true: np.ndarray, y_pred: np.ndarray, x_true: np.ndarray) -> tuple[np.ndarray, float]:
     """
